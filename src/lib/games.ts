@@ -49,7 +49,7 @@ const TITLES: Record<string, string> = {
   deadseat: "Deadseat",
   deltatraveler: "Deltatraveler",
   donottakethiscathome: "Do NOT Take This Cat Home",
-  "fears-to-fathom/home-alone": "Fears to Fathom: Home Alone",
+  "fears-to-fathom": "Fears to Fathom",
   "getting-over-it": "Getting Over It",
   "happy-sheepies": "Happy Sheepies",
   "hotline-miami": "Hotline Miami",
@@ -97,7 +97,7 @@ interface TreeNode {
 
 /* ---------- cache ---------- */
 
-const CACHE_KEY = "scribedesk:games:v1";
+const CACHE_KEY = "scribedesk:games:v2";
 
 export interface GameCache {
   games: RemoteGame[];
@@ -148,8 +148,10 @@ export async function fetchGames(): Promise<FetchResult> {
   const slugs: string[] = [];
   for (const node of nodes) {
     if (node.type !== "tree") continue;
+    // Main game folders only — no paths into a game's own files.
+    if (node.path.includes("/")) continue;
     if (node.path.startsWith(".")) continue;
-    if (IGNORED.has(node.path.split("/")[0])) continue;
+    if (IGNORED.has(node.path)) continue;
     slugs.push(node.path);
   }
   slugs.sort((a, b) => prettify(a).localeCompare(prettify(b)));
