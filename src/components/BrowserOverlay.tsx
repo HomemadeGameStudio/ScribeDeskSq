@@ -42,6 +42,8 @@ export default function BrowserOverlay({ session, engineLabel, deployed, onDestr
 
   const [closing, setClosing] = useState(false);
   const [loaded, setLoaded] = useState(false);
+  const [misrouted, setMisrouted] = useState(false);
+  const [slow, setSlow] = useState(false);
   const [isFs, setIsFs] = useState(false);
   const [spin, setSpin] = useState(false);
   const [copied, setCopied] = useState(false);
@@ -56,11 +58,21 @@ export default function BrowserOverlay({ session, engineLabel, deployed, onDestr
   /* Fresh session → reset frame state. */
   useEffect(() => {
     setLoaded(false);
+    setMisrouted(false);
+    setSlow(false);
     setElapsed(0);
     setClosing(false);
     setCopied(false);
     closingRef.current = false;
-  }, [key, proxied]);
+  }, [key, proxied, reloadKey]);
+
+  /* If nothing lands within 7s, hint that the destination may be
+     refusing to frame (X-Frame-Options) without a live engine. */
+  useEffect(() => {
+    if (loaded || misrouted) return;
+    const id = window.setTimeout(() => setSlow(true), 7000);
+    return () => window.clearTimeout(id);
+  }, [loaded, misrouted, key, reloadKey]);
 
   /* Session clock while live. */
   useEffect(() => {
@@ -105,6 +117,8 @@ export default function BrowserOverlay({ session, engineLabel, deployed, onDestr
     setSpin(true);
     window.setTimeout(() => setSpin(false), 650);
     setLoaded(false);
+    setMisrouted(false);
+    setSlow(false);
     setElapsed(0);
     setReloadKey((k) => k + 1);
   }, []);
@@ -118,6 +132,29 @@ export default function BrowserOverlay({ session, engineLabel, deployed, onDestr
       /* clipboard blocked — no drama */
     }
   }, [proxied]);
+
+  /* Frame diagnostics. A cross-origin destination throws on
+     location access — that's the healthy case. If we CAN read it
+     and it points back at this origin, the static host served the
+     app itself (SPA fallback) instead of the destination: surface
+     that loudly instead of nesting ScribeDesk in ScribeDesk. */
+  const onFrameLoad = useCallback(() => {
+    if (closingRef.current) return;
+    const frame = iframeRef.current;
+    if (frame) {
+      try {
+        const href = frame.contentWindow?.location?.href ?? "";
+        if (href.startsWith(location.origin)) {
+          frame.src = "about:blank";
+          setMisrouted(true);
+          return;
+        }
+      } catch {
+        /* cross-origin → destination loaded as expected */
+      }
+    }
+    setLoaded(true);
+  }, []);
 
   /* Fullscreen tracking. */
   useEffect(() => {
@@ -176,10 +213,13 @@ export default function BrowserOverlay({ session, engineLabel, deployed, onDestr
             </span>
           </button>
 
-          <span className={`sd-player-status is-${loaded ? "live" : "loading"}`} role="status">
+          <span
+            className={`sd-player-status is-${misrouted ? "error" : loaded ? "live" : "loading"}`}
+            role="status"
+          >
             <span className="sd-player-dot" aria-hidden />
-            {loaded ? "live" : deployed ? "tunneling" : "loading"}
-            {loaded && <span className="sd-player-timer">{mins}:{secs}</span>}
+            {misrouted ? "misrouted" : loaded ? "live" : deployed ? "tunneling" : "loading"}
+            {loaded && !misrouted && <span className="sd-player-timer">{mins}:{secs}</span>}
           </span>
 
           {stealth && (
@@ -217,21 +257,37 @@ export default function BrowserOverlay({ session, engineLabel, deployed, onDestr
             key={`${key}-${reloadKey}`}
             ref={iframeRef}
             src={proxied}
-            className={loaded ? "is-live" : ""}
-            onLoad={() => setLoaded(true)}
+            className={loaded && !misrouted ? "is-live" : ""}
+            onLoad={onFrameLoad}
             title={label}
             allow="fullscreen; gamepad; pointer-lock; autoplay; clipboard-write; camera; microphone; geolocation"
             allowFullScreen
           />
 
-          <div className={`sd-player-load${loaded ? " is-done" : ""}`}>
-            <span className="sd-player-ring" aria-hidden />
-            <span className="sd-player-load-title">
-              {deployed ? "Establishing tunnel" : "Framing destination"}
-            </span>
-            <span className="sd-player-load-sub">
-              {engineLabel.toLowerCase()} · {shortUrl(url)}
-            </span>
+          <div className={`sd-player-load${loaded && !misrouted ? " is-done" : ""}${misrouted ? " is-error" : ""}`}>
+            {misrouted ? (
+              <>
+                <span className="sd-player-load-title">Transport misrouted</span>
+                <span className="sd-player-load-sub">
+                  the host served ScribeDesk itself instead of {shortUrl(url)} — deploy a proxy
+                  engine on this origin, then re-arm it in settings
+                </span>
+                <button className="sd-player-retry" onClick={reload}>
+                  retry
+                </button>
+              </>
+            ) : (
+              <>
+                <span className="sd-player-ring" aria-hidden />
+                <span className="sd-player-load-title">
+                  {deployed ? "Establishing tunnel" : "Framing destination"}
+                </span>
+                <span className="sd-player-load-sub">
+                  {engineLabel.toLowerCase()} · {shortUrl(url)}
+                  {slow ? " · slower than expected — destination may refuse framing" : ""}
+                </span>
+              </>
+            )}
           </div>
         </div>
 

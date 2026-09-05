@@ -68,8 +68,8 @@ export default function SettingsModal({ open, settings, onPatch, onClose }: Prop
                   <b>
                     {on && <span className="on-dot" aria-hidden />}
                     {e.label}
-                    <span className={`sd-engine-state${live ? " is-live" : ""}`}>
-                      {live ? "live" : "awaiting deploy"}
+                    <span className={`sd-engine-state${live || id === "embedded" ? " is-live" : ""}`}>
+                      {id === "embedded" ? "built-in" : live ? "live" : "awaiting deploy"}
                     </span>
                   </b>
                   <span>{e.detail}</span>
