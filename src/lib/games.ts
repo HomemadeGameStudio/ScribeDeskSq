@@ -81,7 +81,11 @@ const TITLES: Record<string, string> = {
 
 function prettify(slug: string): string {
   const base = slug.split("/").pop() ?? slug;
-  return TITLES[slug] ?? base.replace(/-/g, " ").replace(/\b\w/g, (c) => c.toUpperCase());
+  return (
+    TITLES[slug] ??
+    TITLES[base] ??
+    base.replace(/-/g, " ").replace(/\b\w/g, (c) => c.toUpperCase())
+  );
 }
 
 function hashHue(slug: string): number {
@@ -97,7 +101,7 @@ interface TreeNode {
 
 /* ---------- cache ---------- */
 
-const CACHE_KEY = "scribedesk:games:v2";
+const CACHE_KEY = "scribedesk:games:v3";
 
 export interface GameCache {
   games: RemoteGame[];
@@ -145,15 +149,40 @@ export async function fetchGames(): Promise<FetchResult> {
     throw new Error("offline");
   }
 
+  /* Tile rule — exactly two sources, nothing else:
+       1. every top-level folder (each one is a game)
+       2. the `games/` container, expanded one level: each of its
+          child folders gets its own tile.
+     Slugs for expanded tiles keep the full path (`games/xyz`), so
+     the player loads everything inside that folder. Deeper nesting
+     never produces extra tiles. */
   const slugs: string[] = [];
   for (const node of nodes) {
     if (node.type !== "tree") continue;
-    // Main game folders only — no paths into a game's own files.
-    if (node.path.includes("/")) continue;
+    if (node.path.includes("/")) continue; // never path into a game's files
     if (node.path.startsWith(".")) continue;
     if (IGNORED.has(node.path)) continue;
+    if (node.path === "games") continue; // expanded below
     slugs.push(node.path);
   }
+
+  try {
+    const res = await fetch(
+      `https://api.github.com/repos/${REPO_OWNER}/${REPO_NAME}/git/trees/${REPO_BRANCH}:games?recursive=0`,
+      { headers: { Accept: "application/vnd.github+json" } }
+    );
+    if (res.ok) {
+      const data = (await res.json()) as { tree?: TreeNode[] };
+      for (const node of data.tree ?? []) {
+        if (node.type === "tree" && !node.path.startsWith(".") && !IGNORED.has(node.path)) {
+          slugs.push(`games/${node.path}`);
+        }
+      }
+    }
+  } catch {
+    /* no `games/` container on this branch — top-level folders stand alone */
+  }
+
   slugs.sort((a, b) => prettify(a).localeCompare(prettify(b)));
 
   const games: RemoteGame[] = slugs.map((slug) => ({
