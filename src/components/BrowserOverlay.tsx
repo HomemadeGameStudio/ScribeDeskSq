@@ -1,29 +1,69 @@
 import { useCallback, useEffect, useRef, useState } from "react";
-import { CloseIcon, CompressIcon, CopyIcon, ExpandIcon, RefreshIcon, ShieldIcon } from "./icons";
+import { ENGINES, isDeployed, resolveThrough, type EngineId } from "../lib/proxy";
+import {
+  CloseIcon,
+  CompressIcon,
+  CopyIcon,
+  ExpandIcon,
+  RefreshIcon,
+  ShieldIcon,
+} from "./icons";
 
 /* ============================================================
    In-page proxy browser. Every site, search, and link on the
    desk renders here — the desk itself never leaves, and no tab
-   is ever spawned. Closing nulls the iframe src so the payload
-   dies instantly (audio, sockets, scripts).
+   is ever spawned.
+
+   Failure handling: the overlay runs a verdict system.
+     unreachable — the destination never answered the probe
+     misrouted   — the host served the desk itself (SPA fallback)
+     timeout     — the frame stalled past the budget
+     refused     — diagnosed frame refusal (X-Frame-Options/CSP)
+   Any verdict swaps the viewport for an error page with a
+   proxy-method switcher. Closing nulls the payload instantly.
    ============================================================ */
 
 export interface BrowserSession {
   label: string;
   /** Raw destination (shown truncated in the address pill). */
   url: string;
-  /** Engine-wrapped URL loaded into the frame. */
-  proxied: string;
   stealth: boolean;
   key: number;
 }
 
 interface Props {
   session: BrowserSession;
-  engineLabel: string;
-  /** Whether the active engine has a real transport (or is the embedded frame). */
-  deployed: boolean;
+  engineId: EngineId;
+  onSwitchEngine: (id: EngineId) => void;
   onDestroy: () => void;
+}
+
+type Verdict = "unreachable" | "misrouted" | "timeout" | "refused";
+
+const VERDICT_COPY: Record<Verdict, { title: string; sub: (host: string) => string }> = {
+  unreachable: {
+    title: "Connection refused",
+    sub: (h) => `${h} never answered the handshake from this network.`,
+  },
+  misrouted: {
+    title: "Transport misrouted",
+    sub: (h) => `the host served ScribeDesk itself instead of ${h} — the route fell back to the app shell.`,
+  },
+  timeout: {
+    title: "Tunnel timed out",
+    sub: (h) => `${h} stalled before the frame could establish a session.`,
+  },
+  refused: {
+    title: "Frame rejected",
+    sub: (h) => `${h} sends X-Frame-Options / CSP frame-ancestors headers that refuse embedded framing on this origin.`,
+  },
+};
+
+const ENGINE_ORDER: EngineId[] = ["embedded", "ultraviolet", "baremux", "rammerhead"];
+
+function engineTag(id: EngineId): { text: string; live: boolean } {
+  if (id === "embedded") return { text: "built-in", live: true };
+  return isDeployed(id) ? { text: "live", live: true } : { text: "awaiting deploy", live: false };
 }
 
 function shortUrl(raw: string): string {
@@ -37,13 +77,17 @@ function shortUrl(raw: string): string {
   }
 }
 
-export default function BrowserOverlay({ session, engineLabel, deployed, onDestroy }: Props) {
-  const { label, url, proxied, stealth, key } = session;
+export default function BrowserOverlay({ session, engineId, onSwitchEngine, onDestroy }: Props) {
+  const { label, url, stealth, key } = session;
+
+  const proxied = resolveThrough(engineId, url);
+  const engineLabel = ENGINES[engineId].label;
+  const deployed = engineId !== "embedded" && isDeployed(engineId);
 
   const [closing, setClosing] = useState(false);
   const [loaded, setLoaded] = useState(false);
-  const [misrouted, setMisrouted] = useState(false);
-  const [slow, setSlow] = useState(false);
+  const [unverified, setUnverified] = useState(false);
+  const [verdict, setVerdict] = useState<Verdict | null>(null);
   const [isFs, setIsFs] = useState(false);
   const [spin, setSpin] = useState(false);
   const [copied, setCopied] = useState(false);
@@ -54,32 +98,57 @@ export default function BrowserOverlay({ session, engineLabel, deployed, onDestr
   const iframeRef = useRef<HTMLIFrameElement>(null);
   const closeRef = useRef<HTMLButtonElement>(null);
   const closingRef = useRef(false);
+  const loadedRef = useRef(false);
 
-  /* Fresh session → reset frame state. */
+  /* Fresh session / engine / reload → reset every signal. */
   useEffect(() => {
     setLoaded(false);
-    setMisrouted(false);
-    setSlow(false);
+    setUnverified(false);
+    setVerdict(null);
     setElapsed(0);
     setClosing(false);
     setCopied(false);
+    loadedRef.current = false;
     closingRef.current = false;
-  }, [key, proxied, reloadKey]);
+  }, [key, engineId, reloadKey]);
 
-  /* If nothing lands within 7s, hint that the destination may be
-     refusing to frame (X-Frame-Options) without a live engine. */
+  /* Session clock (drives the live timer + the diagnose strip). */
   useEffect(() => {
-    if (loaded || misrouted) return;
-    const id = window.setTimeout(() => setSlow(true), 7000);
-    return () => window.clearTimeout(id);
-  }, [loaded, misrouted, key, reloadKey]);
-
-  /* Session clock while live. */
-  useEffect(() => {
-    if (!loaded) return;
     const id = window.setInterval(() => setElapsed((e) => e + 1), 1000);
     return () => window.clearInterval(id);
-  }, [loaded, key, reloadKey]);
+  }, [key, engineId, reloadKey]);
+
+  /* Reachability probe — no-cors HEAD. Anything that resolves
+     means the host answered; a throw means it never did. */
+  useEffect(() => {
+    let stale = false;
+    const ctl = new AbortController();
+    const t = window.setTimeout(() => ctl.abort(), 6500);
+    fetch(url, { method: "HEAD", mode: "no-cors", signal: ctl.signal })
+      .then((res) => {
+        if (!stale && res.type === "error" && !loadedRef.current && !closingRef.current) {
+          setVerdict("unreachable");
+        }
+      })
+      .catch(() => {
+        if (!stale && !loadedRef.current && !closingRef.current) setVerdict("unreachable");
+      });
+    return () => {
+      stale = true;
+      window.clearTimeout(t);
+      ctl.abort();
+    };
+  }, [key, engineId, reloadKey, url]);
+
+  /* Stall budget — if nothing loads within 12s, call it. */
+  useEffect(() => {
+    const t = window.setTimeout(() => {
+      if (!loadedRef.current && !closingRef.current) {
+        setVerdict((v) => (v === null && !loadedRef.current ? "timeout" : v));
+      }
+    }, 12000);
+    return () => window.clearTimeout(t);
+  }, [key, engineId, reloadKey]);
 
   /* Scroll lock + focus management. */
   useEffect(() => {
@@ -117,8 +186,8 @@ export default function BrowserOverlay({ session, engineLabel, deployed, onDestr
     setSpin(true);
     window.setTimeout(() => setSpin(false), 650);
     setLoaded(false);
-    setMisrouted(false);
-    setSlow(false);
+    setUnverified(false);
+    setVerdict(null);
     setElapsed(0);
     setReloadKey((k) => k + 1);
   }, []);
@@ -133,11 +202,16 @@ export default function BrowserOverlay({ session, engineLabel, deployed, onDestr
     }
   }, [proxied]);
 
-  /* Frame diagnostics. A cross-origin destination throws on
-     location access — that's the healthy case. If we CAN read it
-     and it points back at this origin, the static host served the
-     app itself (SPA fallback) instead of the destination: surface
-     that loudly instead of nesting ScribeDesk in ScribeDesk. */
+  const switchEngine = (id: EngineId) => {
+    if (id === engineId) return;
+    setSpin(true);
+    window.setTimeout(() => setSpin(false), 500);
+    onSwitchEngine(id); // settings update → engineId prop changes → reset effect fires
+  };
+
+  /* Frame diagnostics. Cross-origin throws on location access —
+     the healthy case. Same-origin means the host served the app
+     itself (SPA fallback): surface that instead of nesting it. */
   const onFrameLoad = useCallback(() => {
     if (closingRef.current) return;
     const frame = iframeRef.current;
@@ -145,14 +219,15 @@ export default function BrowserOverlay({ session, engineLabel, deployed, onDestr
       try {
         const href = frame.contentWindow?.location?.href ?? "";
         if (href.startsWith(location.origin)) {
-          frame.src = "about:blank";
-          setMisrouted(true);
+          setVerdict("misrouted");
           return;
         }
       } catch {
-        /* cross-origin → destination loaded as expected */
+        /* cross-origin → destination answered; we just can't peek */
+        setUnverified(true);
       }
     }
+    loadedRef.current = true;
     setLoaded(true);
   }, []);
 
@@ -186,6 +261,9 @@ export default function BrowserOverlay({ session, engineLabel, deployed, onDestr
   const mins = Math.floor(elapsed / 60).toString().padStart(2, "0");
   const secs = (elapsed % 60).toString().padStart(2, "0");
 
+  const showStrip = !verdict && !closing && elapsed >= 5 && (loaded ? unverified : true);
+  const copy = verdict ? VERDICT_COPY[verdict] : null;
+
   return (
     <div
       className={`sd-player-overlay${closing ? " is-closing" : ""}`}
@@ -214,12 +292,12 @@ export default function BrowserOverlay({ session, engineLabel, deployed, onDestr
           </button>
 
           <span
-            className={`sd-player-status is-${misrouted ? "error" : loaded ? "live" : "loading"}`}
+            className={`sd-player-status is-${verdict ? "error" : loaded ? "live" : "loading"}`}
             role="status"
           >
             <span className="sd-player-dot" aria-hidden />
-            {misrouted ? "misrouted" : loaded ? "live" : deployed ? "tunneling" : "loading"}
-            {loaded && !misrouted && <span className="sd-player-timer">{mins}:{secs}</span>}
+            {verdict ? "failed" : loaded ? "live" : deployed ? "tunneling" : "loading"}
+            {loaded && !verdict && <span className="sd-player-timer">{mins}:{secs}</span>}
           </span>
 
           {stealth && (
@@ -248,47 +326,95 @@ export default function BrowserOverlay({ session, engineLabel, deployed, onDestr
             </button>
           </span>
 
-          <span className={`sd-player-progress${loaded ? "" : " is-on"}`} aria-hidden />
+          <span className={`sd-player-progress${!loaded && !verdict ? " is-on" : ""}`} aria-hidden />
         </header>
 
         {/* ---------- viewport ---------- */}
         <div className="sd-player-view">
-          <iframe
-            key={`${key}-${reloadKey}`}
-            ref={iframeRef}
-            src={proxied}
-            className={loaded && !misrouted ? "is-live" : ""}
-            onLoad={onFrameLoad}
-            title={label}
-            allow="fullscreen; gamepad; pointer-lock; autoplay; clipboard-write; camera; microphone; geolocation"
-            allowFullScreen
-          />
+          {!verdict && (
+            <iframe
+              key={`${key}-${engineId}-${reloadKey}`}
+              ref={iframeRef}
+              src={proxied}
+              className={loaded ? "is-live" : ""}
+              onLoad={onFrameLoad}
+              title={label}
+              allow="fullscreen; gamepad; pointer-lock; autoplay; clipboard-write; camera; microphone; geolocation"
+              allowFullScreen
+            />
+          )}
 
-          <div className={`sd-player-load${loaded && !misrouted ? " is-done" : ""}${misrouted ? " is-error" : ""}`}>
-            {misrouted ? (
-              <>
-                <span className="sd-player-load-title">Transport misrouted</span>
-                <span className="sd-player-load-sub">
-                  the host served ScribeDesk itself instead of {shortUrl(url)} — deploy a proxy
-                  engine on this origin, then re-arm it in settings
-                </span>
-                <button className="sd-player-retry" onClick={reload}>
-                  retry
+          {/* ---------- error page ---------- */}
+          {verdict && copy && (
+            <div className="sd-err" role="alert">
+              <span className="sd-err-badge" aria-hidden>
+                <svg width="24" height="24" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="1.8" strokeLinecap="round" strokeLinejoin="round">
+                  <path d="M12 3.6 22 20H2Z" />
+                  <path d="M12 10v4.4" />
+                  <circle cx="12" cy="17.1" r="0.5" fill="currentColor" />
+                </svg>
+              </span>
+              <h3>{copy.title}</h3>
+              <p>{copy.sub(shortUrl(url))}</p>
+
+              <div className="sd-err-switch">switch proxy method</div>
+              <div className="sd-err-engines">
+                {ENGINE_ORDER.map((id) => {
+                  const active = id === engineId;
+                  const tag = engineTag(id);
+                  return (
+                    <button
+                      key={id}
+                      className="sd-err-engine"
+                      disabled={active}
+                      onClick={() => switchEngine(id)}
+                      title={active ? "Currently armed" : `Route through ${ENGINES[id].label}`}
+                    >
+                      <b>
+                        {ENGINES[id].label}
+                        {active && <span className="active-flag">armed</span>}
+                      </b>
+                      <span className={`sd-engine-state${tag.live ? " is-live" : ""}`}>{tag.text}</span>
+                    </button>
+                  );
+                })}
+              </div>
+
+              <div className="sd-err-actions">
+                <button className="sd-err-btn primary" onClick={reload}>
+                  retry · {engineLabel.toLowerCase()}
                 </button>
-              </>
-            ) : (
-              <>
-                <span className="sd-player-ring" aria-hidden />
-                <span className="sd-player-load-title">
-                  {deployed ? "Establishing tunnel" : "Framing destination"}
-                </span>
-                <span className="sd-player-load-sub">
-                  {engineLabel.toLowerCase()} · {shortUrl(url)}
-                  {slow ? " · slower than expected — destination may refuse framing" : ""}
-                </span>
-              </>
-            )}
-          </div>
+                <button className="sd-err-btn" onClick={close}>
+                  close browser
+                </button>
+              </div>
+            </div>
+          )}
+
+          {/* ---------- load panel ---------- */}
+          {!verdict && (
+            <div className={`sd-player-load${loaded ? " is-done" : ""}`}>
+              <span className="sd-player-ring" aria-hidden />
+              <span className="sd-player-load-title">
+                {deployed ? "Establishing tunnel" : "Framing destination"}
+              </span>
+              <span className="sd-player-load-sub">
+                {engineLabel.toLowerCase()} · {shortUrl(url)}
+              </span>
+            </div>
+          )}
+
+          {/* ---------- stalled diagnose strip ---------- */}
+          {showStrip && (
+            <button
+              className="sd-strip-btn"
+              onClick={() => setVerdict("refused")}
+              title="Destination not rendering? Open the error page"
+            >
+              <span className="tag">stalled</span>
+              not visible? the destination may refuse framing — diagnose
+            </button>
+          )}
         </div>
 
         {/* ---------- status strip ---------- */}
@@ -300,9 +426,9 @@ export default function BrowserOverlay({ session, engineLabel, deployed, onDestr
           <span className="sd-player-url" title={url}>
             {url}
           </span>
-          {!deployed && (
+          {engineId !== "embedded" && !isDeployed(engineId) && (
             <span className="sd-browser-note">
-              embedded frame — sites that refuse framing need a live engine
+              slot not deployed — falling back to the embedded frame
             </span>
           )}
           <span className="sd-player-hints">

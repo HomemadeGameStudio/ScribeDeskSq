@@ -127,9 +127,8 @@ export default function App() {
     await simulateTunnel((stage) => setRouting({ label, stage }));
 
     const s = settingsRef.current;
-    const proxied = resolveThrough(s.engine, url);
     beginStealth(stealth);
-    setBrowser({ label, url, proxied, stealth, key: Date.now() });
+    setBrowser({ label, url, stealth, key: Date.now() });
     showToast(`in-page → ${label} · ${ENGINES[s.engine].label.toLowerCase()}`);
     setRouting(null);
     setRoutingId(null);
@@ -335,8 +334,11 @@ export default function App() {
       {browser && (
         <BrowserOverlay
           session={browser}
-          engineLabel={ENGINES[settings.engine].label}
-          deployed={isDeployed(settings.engine)}
+          engineId={settings.engine}
+          onSwitchEngine={(id) => {
+            setSettings((s) => ({ ...s, engine: id }));
+            showToast(`${ENGINES[id].label} engaged · reframing ${browser.label}`);
+          }}
           onDestroy={destroyBrowser}
         />
       )}
