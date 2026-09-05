@@ -1,15 +1,19 @@
 /* ============================================================
    ScribeDesk — Games Registry
    ------------------------------------------------------------
-   The shelf is fetched live from the ScribeDesk web-port repo:
+   Shelf listing → GitHub trees API (public, CORS-open) from
      github.com/HomemadeGameStudio/lessons-moved-
+   Payloads      → rawcdn.githack.com (correct content types).
 
-   Directory listing → GitHub trees API (public, CORS-open).
-   Game payload      → rawcdn.githack.com serves each folder's
-                       index.html with correct content types.
+   Entry resolution supports every playable file type a port
+   can ship:
+     1. index.html / index.htm            (HEAD probe, no API hit)
+     2. any .html / .htm / .xhtml         (trees listing fallback)
+     3. .swf                              (executed via Ruffle shim)
+     4. anything else                     → surfaced as unsupported
 
-   Every entry URL still passes through the proxy bridge
-   (`resolveThrough`) before reaching an iframe or tab.
+   Every resolved URL still passes through the proxy bridge
+   before it reaches an iframe. Nothing ever opens in a tab.
    ============================================================ */
 
 export interface RemoteGame {
@@ -77,23 +81,13 @@ const TITLES: Record<string, string> = {
 
 function prettify(slug: string): string {
   const base = slug.split("/").pop() ?? slug;
-  return (
-    TITLES[slug] ??
-    base
-      .replace(/-/g, " ")
-      .replace(/\b\w/g, (c) => c.toUpperCase())
-  );
+  return TITLES[slug] ?? base.replace(/-/g, " ").replace(/\b\w/g, (c) => c.toUpperCase());
 }
 
 function hashHue(slug: string): number {
   let h = 0;
   for (let i = 0; i < slug.length; i++) h = (h * 31 + slug.charCodeAt(i)) % 360;
   return h;
-}
-
-/** Rebuild a game descriptor from just a slug (used by external bridge hooks). */
-export function describeGame(slug: string): RemoteGame {
-  return { slug, name: prettify(slug), hue: hashHue(slug) };
 }
 
 interface TreeNode {
@@ -130,7 +124,7 @@ function writeCache(games: RemoteGame[]): void {
   }
 }
 
-/* ---------- fetch ---------- */
+/* ---------- shelf fetch ---------- */
 
 export interface FetchResult {
   games: RemoteGame[];
@@ -170,23 +164,106 @@ export async function fetchGames(): Promise<FetchResult> {
   return { games, cached: false };
 }
 
-/* ---------- entry resolution ----------
-   Each port is a folder with an index.html; nested ports
-   (e.g. fears-to-fathom/home-alone) resolve via the deepest tree. */
+/* ---------- entry resolution (all file types) ---------- */
+
+export type EntryKind = "html" | "swf" | "unsupported";
+
+export interface GameEntry {
+  url: string;
+  kind: EntryKind;
+  /** File path inside the port folder, or a summary of found extensions. */
+  file: string;
+}
 
 export function gameBaseUrl(game: RemoteGame): string {
   return `${CDN}/${REPO_OWNER}/${REPO_NAME}/${REPO_BRANCH}/${game.slug}/`;
 }
 
-const entryCache = new Map<string, string>();
+async function probe(url: string): Promise<boolean> {
+  try {
+    const res = await fetch(url, { method: "HEAD" });
+    return res.ok;
+  } catch {
+    return false;
+  }
+}
 
-export async function resolveGameEntry(game: RemoteGame): Promise<string> {
+/** Lower = better document candidate. ≥5 = not executable in-browser. */
+function rank(path: string): number {
+  const low = path.toLowerCase();
+  if (/(^|\/)index\.x?html?$/.test(low)) return 0;
+  if (low.endsWith(".html")) return 1;
+  if (low.endsWith(".htm")) return 2;
+  if (low.endsWith(".xhtml")) return 3;
+  if (low.endsWith(".swf")) return 4;
+  return 5;
+}
+
+const entryCache = new Map<string, GameEntry>();
+
+export async function resolveGameEntry(game: RemoteGame): Promise<GameEntry> {
   const hit = entryCache.get(game.slug);
   if (hit) return hit;
 
   const base = gameBaseUrl(game);
-  const res = await fetch(base, { method: "HEAD" });
-  if (!res.ok) throw new Error(`entry 404 for ${game.slug}`);
-  entryCache.set(game.slug, base);
-  return base;
+
+  /* Fast path — the two conventional entry files. */
+  for (const f of ["index.html", "index.htm"]) {
+    if (await probe(base + f)) {
+      const entry: GameEntry = { url: base + f, kind: "html", file: f };
+      entryCache.set(game.slug, entry);
+      return entry;
+    }
+  }
+
+  /* Slow path — list the port folder and pick the best executable file,
+     including entries nested in sub-folders. */
+  let entry: GameEntry;
+  try {
+    const res = await fetch(
+      `https://api.github.com/repos/${REPO_OWNER}/${REPO_NAME}/git/trees/${REPO_BRANCH}:${game.slug}?recursive=1`,
+      { headers: { Accept: "application/vnd.github+json" } }
+    );
+    if (!res.ok) throw new Error(`listing ${res.status}`);
+    const data = (await res.json()) as { tree?: TreeNode[] };
+    const blobs = (data.tree ?? []).filter((n) => n.type === "blob");
+
+    const candidates = blobs
+      .filter((b) => rank(b.path) < 5)
+      .sort((a, b) => rank(a.path) - rank(b.path) || a.path.length - b.path.length || a.path.localeCompare(b.path));
+
+    if (candidates.length > 0) {
+      const file = candidates[0].path;
+      const kind: EntryKind = file.toLowerCase().endsWith(".swf") ? "swf" : "html";
+      entry = {
+        url: base + file.split("/").map(encodeURIComponent).join("/"),
+        kind,
+        file,
+      };
+    } else {
+      const exts = blobs.length
+        ? [...new Set(blobs.map((b) => `.${b.path.split(".").pop() ?? "?"}`))].slice(0, 4).join(" ")
+        : "empty folder";
+      entry = { url: base, kind: "unsupported", file: exts };
+    }
+  } catch {
+    throw new Error(`no entry found under /${game.slug}`);
+  }
+
+  entryCache.set(game.slug, entry);
+  return entry;
+}
+
+/** Build a game object from a bare slug (bridge hook: `play("ultrakill")`). */
+export function describeGame(slug: string): RemoteGame {
+  return { slug, name: prettify(slug), hue: hashHue(slug) };
+}
+
+/* ---------- Ruffle shim for legacy Flash ports ---------- */
+
+export function ruffleDocument(swfUrl: string): string {
+  return `<!doctype html><html><head><meta charset="utf-8">
+<style>html,body{margin:0;height:100%;background:#000;overflow:hidden}ruffle-embed{width:100%;height:100%}</style>
+<script src="https://unpkg.com/@ruffle-rs/ruffle"><\/script>
+</head><body><ruffle-embed src="${swfUrl}"></ruffle-embed></body></html>`;
 }

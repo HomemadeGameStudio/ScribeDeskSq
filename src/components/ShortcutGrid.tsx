@@ -6,12 +6,12 @@ interface Props {
   category: Category | "all";
   routingId: string | null;
   onOpen: (s: Shortcut) => void;
-  onCloak: (s: Shortcut) => void;
+  onStealth: (s: Shortcut) => void;
 }
 
 const TAG: Record<Category, string> = { apps: "APP", ai: "AI", games: "GAME" };
 
-export default function ShortcutGrid({ category, routingId, onOpen, onCloak }: Props) {
+export default function ShortcutGrid({ category, routingId, onOpen, onStealth }: Props) {
   const items = category === "all" ? SHORTCUTS : SHORTCUTS.filter((s) => s.category === category);
 
   return (
@@ -57,17 +57,17 @@ export default function ShortcutGrid({ category, routingId, onOpen, onCloak }: P
               className="sd-card-cloak"
               role="button"
               tabIndex={0}
-              title={`Open ${s.name} in a cloaked about:blank tab`}
-              aria-label={`Open ${s.name} cloaked`}
+              title={`Stealth open ${s.name} — in-page with tab identity cloaked`}
+              aria-label={`Stealth open ${s.name}`}
               onClick={(e) => {
                 e.stopPropagation();
-                onCloak(s);
+                onStealth(s);
               }}
               onKeyDown={(e) => {
                 if (e.key === "Enter" || e.key === " ") {
                   e.preventDefault();
                   e.stopPropagation();
-                  onCloak(s);
+                  onStealth(s);
                 }
               }}
             >

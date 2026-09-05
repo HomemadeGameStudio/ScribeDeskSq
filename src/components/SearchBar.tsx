@@ -31,7 +31,7 @@ export default function SearchBar({ engineLabel, routing, onRoute, onEngineClick
           ref={inputRef}
           className="sd-route-input"
           type="text"
-          placeholder="Search the web or enter a URL…"
+          placeholder="Search the web or enter a URL — opens in-page"
           autoComplete="off"
           spellCheck={false}
           aria-label="Search or URL"

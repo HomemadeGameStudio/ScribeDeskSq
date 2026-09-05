@@ -118,27 +118,24 @@ export default function SettingsModal({ open, settings, onPatch, onClose }: Prop
           <div className="sd-toggle-row">
             <div className="sd-toggle-meta">
               <b>
-                <GlobeIcon size={14} color="#35d48a" /> about:blank launches
+                <GlobeIcon size={14} color="#35d48a" /> In-page everything
               </b>
-              <span>Open every tunnel inside a cloaked blank tab instead of a plain one.</span>
+              <span>
+                The desk never spawns tabs. Sites, searches, games — even these doc links — all open
+                inside the on-page proxy viewport. Closing a session kills its payload instantly.
+              </span>
             </div>
-            <button
-              className={`sd-switch${settings.blankCloak ? " is-on" : ""}`}
-              onClick={() => onPatch({ blankCloak: !settings.blankCloak })}
-              role="switch"
-              aria-checked={settings.blankCloak}
-              aria-label="Toggle about blank launches"
-            >
-              <span className="knob" />
-            </button>
           </div>
 
           <div className="sd-toggle-row">
             <div className="sd-toggle-meta">
               <b>
-                <ShieldIcon size={14} color="#ff6a3d" /> Shield chips
+                <ShieldIcon size={14} color="#ff6a3d" /> Stealth shields
               </b>
-              <span>Hover any card for the shield — one click opens it cloaked, whatever the toggle above says.</span>
+              <span>
+                Hover any card for the shield — it opens the session in-page with the tab identity
+                cloaked (your preset above, or Classroom) until you close it.
+              </span>
             </div>
           </div>
         </section>

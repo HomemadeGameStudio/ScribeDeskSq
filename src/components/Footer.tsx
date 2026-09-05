@@ -5,9 +5,11 @@ interface Props {
   clock: string;
   panicEnabled: boolean;
   onPanic: () => void;
+  /** Route a URL through the in-page browser (no tabs, ever). */
+  onBrowse: (url: string) => void;
 }
 
-export default function Footer({ greeting, ping, pingOk, clock, panicEnabled, onPanic }: Props) {
+export default function Footer({ greeting, ping, pingOk, clock, panicEnabled, onPanic, onBrowse }: Props) {
   return (
     <footer className="sd-footer">
       <div className="sd-greet">
@@ -37,17 +39,17 @@ export default function Footer({ greeting, ping, pingOk, clock, panicEnabled, on
       </div>
 
       <div className="sd-links">
-        <a href="https://github.com/titaniumnetwork-dev/Ultraviolet" target="_blank" rel="noreferrer">
+        <button onClick={() => onBrowse("https://github.com/titaniumnetwork-dev/Ultraviolet")} title="Open in the in-page browser">
           ultraviolet
-        </a>
+        </button>
         <span className="sep" aria-hidden>/</span>
-        <a href="https://github.com/MercuryWorkshop/bare-mux" target="_blank" rel="noreferrer">
+        <button onClick={() => onBrowse("https://github.com/MercuryWorkshop/bare-mux")} title="Open in the in-page browser">
           bare-mux
-        </a>
+        </button>
         <span className="sep" aria-hidden>/</span>
-        <a href="https://github.com/HomemadeGameStudio/lessons-moved-" target="_blank" rel="noreferrer">
+        <button onClick={() => onBrowse("https://github.com/HomemadeGameStudio/lessons-moved-")} title="Open in the in-page browser">
           ports
-        </a>
+        </button>
       </div>
     </footer>
   );

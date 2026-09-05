@@ -4,13 +4,14 @@ import { fetchGames, REPO_URL, type RemoteGame } from "../lib/games";
 import { GamepadIcon, RefreshIcon, ShieldIcon } from "./icons";
 
 interface Props {
-  onLaunch: (game: RemoteGame) => void;
-  onCloak: (game: RemoteGame) => void;
+  onLaunch: (game: RemoteGame, stealth?: boolean) => void;
+  /** Route a URL through the in-page browser (no tabs, ever). */
+  onBrowse: (url: string) => void;
 }
 
 type Phase = "loading" | "ready" | "error";
 
-export default function GamesLibrary({ onLaunch, onCloak }: Props) {
+export default function GamesLibrary({ onLaunch, onBrowse }: Props) {
   const [phase, setPhase] = useState<Phase>("loading");
   const [games, setGames] = useState<RemoteGame[]>([]);
   const [fromCache, setFromCache] = useState(false);
@@ -63,9 +64,9 @@ export default function GamesLibrary({ onLaunch, onCloak }: Props) {
             <>
               <span>{games.length} ports</span>
               {fromCache && <span className="sd-chip-state is-cached">cached</span>}
-              <a className="src-link" href={REPO_URL} target="_blank" rel="noreferrer">
+              <button className="src-link" onClick={() => onBrowse(REPO_URL)} title="Open repo in the in-page browser">
                 src
-              </a>
+              </button>
             </>
           )}
           {phase === "loading" && <span>syncing repo…</span>}
@@ -132,17 +133,17 @@ export default function GamesLibrary({ onLaunch, onCloak }: Props) {
                 className="sd-tile-cloak"
                 role="button"
                 tabIndex={0}
-                title={`Open ${g.name} in a cloaked about:blank tab`}
-                aria-label={`Open ${g.name} cloaked`}
+                title={`Stealth launch ${g.name} — in-page with tab identity cloaked`}
+                aria-label={`Stealth launch ${g.name}`}
                 onClick={(e) => {
                   e.stopPropagation();
-                  onCloak(g);
+                  onLaunch(g, true);
                 }}
                 onKeyDown={(e) => {
                   if (e.key === "Enter" || e.key === " ") {
                     e.preventDefault();
                     e.stopPropagation();
-                    onCloak(g);
+                    onLaunch(g, true);
                   }
                 }}
               >

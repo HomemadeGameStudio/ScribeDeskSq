@@ -7,7 +7,6 @@ export interface SettingsState {
   cloak: CloakId;
   panicEnabled: boolean;
   panicTarget: "classroom" | "drive" | "gmail";
-  blankCloak: boolean;
 }
 
 export const DEFAULT_SETTINGS: SettingsState = {
@@ -15,7 +14,6 @@ export const DEFAULT_SETTINGS: SettingsState = {
   cloak: "none",
   panicEnabled: true,
   panicTarget: "classroom",
-  blankCloak: false,
 };
 
 export const CLOAKS: Record<CloakId, { label: string; title: string; domain: string }> = {

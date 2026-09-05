@@ -95,21 +95,11 @@ export function resolveThrough(engineId: string, url: string): string {
   return getEngine(engineId).wrap(url);
 }
 
-/* ---------- about:blank tab cloak ---------- */
-
-export function openCloaked(proxiedUrl: string, title = "ScribeDesk"): Window | null {
-  const win = window.open("about:blank", "_blank");
-  if (!win) return null;
-  const doc = win.document;
-  doc.open();
-  doc.write(`<!doctype html>
-<html><head><title>${title}</title>
-<link rel="icon" href=",">
-<style>html,body{margin:0;height:100%;background:#0a0a0a}iframe{border:0;width:100%;height:100%;display:block}</style>
-</head><body><iframe src="${proxiedUrl}" allow="fullscreen; autoplay; clipboard-write; gamepad"></iframe></body></html>`);
-  doc.close();
-  return win;
-}
+/* ---------- In-page policy ----------
+   ScribeDesk never spawns tabs. Every destination — sites,
+   searches, games, even doc links — renders inside an in-page
+   proxy viewport. Cloaking is a document-level title/favicon
+   rewrite, applied to this page while a session is open. */
 
 /* ---------- Simulated tunnel handshake ----------
    Perceptible routing feedback for the console. When a live

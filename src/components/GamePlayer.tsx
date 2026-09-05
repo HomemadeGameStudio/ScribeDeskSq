@@ -1,21 +1,25 @@
 import { useCallback, useEffect, useRef, useState } from "react";
 import type { CSSProperties } from "react";
-import type { RemoteGame } from "../lib/games";
-import { CloseIcon, CompressIcon, ExpandIcon, RefreshIcon } from "./icons";
+import { ruffleDocument, type GameEntry, type RemoteGame } from "../lib/games";
+import { CloseIcon, CompressIcon, ExpandIcon, RefreshIcon, ShieldIcon } from "./icons";
 
 /* ============================================================
    In-page player session.
    One iframe payload at a time — clicking a different tile swaps
-   the session object, React swaps the `src`; the page never
-   navigates. Closing nulls the iframe src (kills audio/processes)
-   and unmounts the frame.
+   the session object and the `src`/`srcDoc`; the page never
+   navigates and no tab is ever spawned. Closing nulls the iframe
+   src (kills audio/processes) and unmounts the frame.
+
+   Supports every resolvable payload type:
+     html → direct frame · swf → Ruffle shim · other → surfaced
    ============================================================ */
 
 export interface PlayerSession {
   game: RemoteGame;
-  /** Proxied entry URL. `null` while the port is being located. */
-  url: string | null;
+  /** Resolved payload. `null` while the port is being located. */
+  entry: GameEntry | null;
   error: string | null;
+  stealth: boolean;
   key: number;
 }
 
@@ -52,7 +56,7 @@ function shortUrl(url: string): string {
 }
 
 export default function GamePlayer({ session, engineLabel, onDestroy, onRetry }: Props) {
-  const { game, url, error, key } = session;
+  const { game, entry, error, stealth, key } = session;
 
   const [closing, setClosing] = useState(false);
   const [loaded, setLoaded] = useState(false);
@@ -66,15 +70,17 @@ export default function GamePlayer({ session, engineLabel, onDestroy, onRetry }:
   const closeRef = useRef<HTMLButtonElement>(null);
   const closingRef = useRef(false);
 
-  const status: Status = error ? "error" : !url ? "locating" : loaded ? "live" : "loading";
+  const unsupported = entry?.kind === "unsupported";
+  const status: Status = error || unsupported ? "error" : !entry ? "locating" : loaded ? "live" : "loading";
+  const playable = !!entry && entry.kind !== "unsupported";
 
-  /* Fresh session (or new proxied URL) → reset the frame state. */
+  /* Fresh session (or newly resolved entry) → reset the frame state. */
   useEffect(() => {
     setLoaded(false);
     setElapsed(0);
     setClosing(false);
     closingRef.current = false;
-  }, [key, url]);
+  }, [key, entry?.url]);
 
   /* Session clock while live. */
   useEffect(() => {
@@ -122,15 +128,15 @@ export default function GamePlayer({ session, engineLabel, onDestroy, onRetry }:
   }, []);
 
   const reload = useCallback(() => {
-    if (!url) return;
+    if (!playable) return;
     setSpin(true);
     window.setTimeout(() => setSpin(false), 650);
     setLoaded(false);
     setElapsed(0);
     setReloadKey((k) => k + 1);
-  }, [url]);
+  }, [playable]);
 
-  /* Fullscreen tracking (icon + Esc behavior). */
+  /* Fullscreen tracking. */
   useEffect(() => {
     const onFs = () => setIsFs(!!document.fullscreenElement);
     document.addEventListener("fullscreenchange", onFs);
@@ -182,7 +188,11 @@ export default function GamePlayer({ session, engineLabel, onDestroy, onRetry }:
 
           <span className="sd-player-id">
             <span className="sd-player-title">{game.name}</span>
-            <span className="sd-player-sub">web port · /{game.slug}</span>
+            <span className="sd-player-sub">
+              web port · /{game.slug}
+              {entry && playable && <> · {entry.file}</>}
+              {entry?.kind === "swf" && <> · flash</>}
+            </span>
           </span>
 
           <span className={`sd-player-status is-${status}`} role="status">
@@ -190,6 +200,13 @@ export default function GamePlayer({ session, engineLabel, onDestroy, onRetry }:
             {STATUS_LABEL[status]}
             {status === "live" && <span className="sd-player-timer">{fmt(elapsed)}</span>}
           </span>
+
+          {stealth && (
+            <span className="sd-stealth-chip" title="Stealth session — tab identity cloaked">
+              <ShieldIcon size={12} />
+              stealth
+            </span>
+          )}
 
           <span className="sd-player-actions">
             <button
@@ -203,7 +220,7 @@ export default function GamePlayer({ session, engineLabel, onDestroy, onRetry }:
             <button
               className="sd-p-btn"
               onClick={reload}
-              disabled={!url}
+              disabled={!playable}
               aria-label="Reload frame"
               title="Reload (R)"
             >
@@ -221,11 +238,13 @@ export default function GamePlayer({ session, engineLabel, onDestroy, onRetry }:
 
         {/* ---------- viewport ---------- */}
         <div className="sd-player-view">
-          {url && (
+          {playable && entry && (
             <iframe
               key={`${key}-${reloadKey}`}
               ref={iframeRef}
-              src={url}
+              {...(entry.kind === "swf"
+                ? { srcDoc: ruffleDocument(entry.url) }
+                : { src: entry.url })}
               className={loaded ? "is-live" : ""}
               onLoad={() => setLoaded(true)}
               title={game.name}
@@ -238,10 +257,16 @@ export default function GamePlayer({ session, engineLabel, onDestroy, onRetry }:
             {status === "error" ? (
               <>
                 <span className="sd-player-load-title">Port unreachable</span>
-                <span className="sd-player-load-sub">{error ?? "no index.html found"}</span>
-                <button className="sd-player-retry" onClick={() => onRetry(game)}>
-                  retry resolve
-                </button>
+                <span className="sd-player-load-sub">
+                  {unsupported
+                    ? `can't execute ${entry?.file ?? "nothing"} in-browser`
+                    : error ?? "no entry file found"}
+                </span>
+                {!unsupported && (
+                  <button className="sd-player-retry" onClick={() => onRetry(game)}>
+                    retry resolve
+                  </button>
+                )}
               </>
             ) : (
               <>
@@ -251,8 +276,10 @@ export default function GamePlayer({ session, engineLabel, onDestroy, onRetry }:
                 </span>
                 <span className="sd-player-load-sub">
                   {status === "locating"
-                    ? `pulling /${game.slug} from repo`
-                    : `${engineLabel.toLowerCase()} tunnel · rawcdn mirror`}
+                    ? `sniffing /${game.slug} for playable files`
+                    : `${engineLabel.toLowerCase()} tunnel · ${
+                        entry?.kind === "swf" ? "ruffle flash shim" : "rawcdn mirror"
+                      }`}
                 </span>
               </>
             )}
@@ -265,8 +292,8 @@ export default function GamePlayer({ session, engineLabel, onDestroy, onRetry }:
             <span className="dot" aria-hidden />
             {engineLabel}
           </span>
-          <span className="sd-player-url" title={url ?? undefined}>
-            {url ? shortUrl(url) : "resolving entry…"}
+          <span className="sd-player-url" title={entry?.url}>
+            {entry && playable ? shortUrl(entry.url) : "resolving entry…"}
           </span>
           <span className="sd-player-hints">
             <span><kbd>esc</kbd>close</span>

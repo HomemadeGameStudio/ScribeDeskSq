@@ -4,6 +4,7 @@ import SearchBar, { type RoutingState } from "./components/SearchBar";
 import ShortcutGrid from "./components/ShortcutGrid";
 import GamesLibrary from "./components/GamesLibrary";
 import GamePlayer, { type PlayerSession } from "./components/GamePlayer";
+import BrowserOverlay, { type BrowserSession } from "./components/BrowserOverlay";
 import Footer from "./components/Footer";
 import SettingsModal from "./components/SettingsModal";
 import {
@@ -11,7 +12,6 @@ import {
   ENGINES,
   HANDSHAKE_STAGES,
   normalizeInput,
-  openCloaked,
   resolveThrough,
   simulateTunnel,
 } from "./lib/proxy";
@@ -48,6 +48,7 @@ export default function App() {
   const [routing, setRouting] = useState<RoutingState | null>(null);
   const [routingId, setRoutingId] = useState<string | null>(null);
   const [player, setPlayer] = useState<PlayerSession | null>(null);
+  const [browser, setBrowser] = useState<BrowserSession | null>(null);
   const [toast, setToast] = useState<Toast | null>(null);
   const [ping, setPing] = useState(24);
   const [clock, setClock] = useState(() => new Date());
@@ -57,12 +58,15 @@ export default function App() {
   settingsRef.current = settings;
   const playerRef = useRef(player);
   playerRef.current = player;
+  const browserRef = useRef(browser);
+  browserRef.current = browser;
+  const stealthRef = useRef(false);
 
   /* ---------- persistence + cloak side effects ---------- */
 
   useEffect(() => {
     saveSettings(settings);
-    applyCloak(settings.cloak);
+    if (!stealthRef.current) applyCloak(settings.cloak);
   }, [settings]);
 
   /* ---------- telemetry: simulated ping + clock ---------- */
@@ -96,21 +100,36 @@ export default function App() {
     );
   };
 
-  /* ---------- routing pipeline (tab tunnels) ----------
-     Every destination flows through `resolveThrough` — the desk
-     never opens a raw URL. */
+  /* ---------- stealth cloaking ----------
+     While a stealth session is open, the tab identity is rewritten
+     to the configured cloak (Classroom by default) and restored
+     the moment the session is destroyed. */
 
-  const finishRoute = async (label: string, url: string) => {
+  const beginStealth = (stealth: boolean) => {
+    if (!stealth) return;
+    stealthRef.current = true;
+    const s = settingsRef.current;
+    applyCloak(s.cloak !== "none" ? s.cloak : "classroom");
+  };
+
+  const endStealth = () => {
+    if (!stealthRef.current) return;
+    stealthRef.current = false;
+    applyCloak(settingsRef.current.cloak);
+  };
+
+  /* ---------- in-page routing pipeline ----------
+     Every destination is engine-wrapped and rendered inside the
+     on-page proxy viewport. No window.open. No tabs. Ever. */
+
+  const finishRoute = async (url: string, label: string, stealth: boolean) => {
     await simulateTunnel((stage) => setRouting({ label, stage }));
 
     const s = settingsRef.current;
     const proxied = resolveThrough(s.engine, url);
-    if (s.blankCloak) {
-      openCloaked(proxied, label);
-    } else {
-      window.open(proxied, "_blank", "noopener");
-    }
-    showToast(`tunnel open → ${label} · ${ENGINES[s.engine].label.toLowerCase()}`);
+    beginStealth(stealth);
+    setBrowser({ label, url, proxied, stealth, key: Date.now() });
+    showToast(`in-page → ${label} · ${ENGINES[s.engine].label.toLowerCase()}`);
     setRouting(null);
     setRoutingId(null);
   };
@@ -121,55 +140,54 @@ export default function App() {
     const label = source ? source.name : intent.display;
     setRouting({ label, stage: HANDSHAKE_STAGES[0] });
     setRoutingId(source?.id ?? null);
-    await finishRoute(label, intent.url);
+    await finishRoute(intent.url, label, false);
   };
 
-  const handleCloak = (s: Shortcut) => {
-    const proxied = resolveThrough(settingsRef.current.engine, s.url);
-    openCloaked(proxied, s.name);
-    showToast(`cloaked tab → ${s.name} (about:blank)`);
+  const handleStealth = async (s: Shortcut) => {
+    if (routing) return;
+    setRouting({ label: s.name, stage: HANDSHAKE_STAGES[0] });
+    setRoutingId(s.id);
+    await finishRoute(s.url, s.name, true);
   };
 
-  /* ---------- in-page player sessions ----------
-     Clicking a game tile swaps the session payload; the page
-     never navigates. The iframe src is always engine-wrapped. */
+  const destroyBrowser = () => {
+    setBrowser(null);
+    endStealth();
+  };
+
+  /* ---------- in-page player sessions ---------- */
 
   const resolveInto = (game: RemoteGame) => {
     resolveGameEntry(game)
       .then((entry) => {
-        const proxied = resolveThrough(settingsRef.current.engine, entry);
+        const proxied = { ...entry, url: resolveThrough(settingsRef.current.engine, entry.url) };
         setPlayer((p) =>
-          p && p.game.slug === game.slug && !p.url && !p.error ? { ...p, url: proxied } : p
+          p && p.game.slug === game.slug && !p.entry && !p.error ? { ...p, entry: proxied } : p
         );
       })
-      .catch(() => {
+      .catch((err: unknown) => {
         setPlayer((p) =>
-          p && p.game.slug === game.slug && !p.url ? { ...p, error: `no index.html under /${game.slug}` } : p
+          p && p.game.slug === game.slug && !p.entry
+            ? { ...p, error: err instanceof Error ? err.message : "resolve failed" }
+            : p
         );
       });
   };
 
-  const openPlayer = (game: RemoteGame) => {
-    setPlayer({ game, url: null, error: null, key: Date.now() });
+  const openPlayer = (game: RemoteGame, stealth = false) => {
+    beginStealth(stealth);
+    setPlayer({ game, entry: null, error: null, stealth, key: Date.now() });
     resolveInto(game);
   };
 
   const retryPlayer = (game: RemoteGame) => {
-    setPlayer((p) => (p ? { ...p, url: null, error: null, key: Date.now() } : p));
+    setPlayer((p) => (p ? { ...p, entry: null, error: null, key: Date.now() } : p));
     resolveInto(game);
   };
 
-  const destroyPlayer = () => setPlayer(null);
-
-  const cloakGame = async (game: RemoteGame) => {
-    try {
-      const entry = await resolveGameEntry(game);
-      const proxied = resolveThrough(settingsRef.current.engine, entry);
-      openCloaked(proxied, game.name);
-      showToast(`cloaked tab → ${game.name} (about:blank)`);
-    } catch {
-      showToast(`port missing → /${game.slug} has no index.html`);
-    }
+  const destroyPlayer = () => {
+    setPlayer(null);
+    endStealth();
   };
 
   const panic = () => {
@@ -196,7 +214,8 @@ export default function App() {
         panic();
         return;
       }
-      if (((e.key === "/" && !typing) || ((e.metaKey || e.ctrlKey) && e.key.toLowerCase() === "k")) && !playerRef.current) {
+      const sessionOpen = !!playerRef.current || !!browserRef.current;
+      if (((e.key === "/" && !typing) || ((e.metaKey || e.ctrlKey) && e.key.toLowerCase() === "k")) && !sessionOpen) {
         e.preventDefault();
         setSettingsOpen(false);
         searchRef.current?.focus();
@@ -226,7 +245,7 @@ export default function App() {
       <main className="sd-main">
         <header className="sd-hero">
           <div className="sd-overline">
-            Web proxy console · build <b>3.0.0</b>
+            Web proxy console · build <b>3.1.0</b>
           </div>
           <h1 className="sd-wordmark" aria-label="ScribeDesk">
             {WORDMARK.split("").map((ch, i) => (
@@ -243,7 +262,8 @@ export default function App() {
             </span>
           </h1>
           <p className="sd-tagline">
-            Route anything. <strong>Trace nothing.</strong> Games load right here — the page never leaves.
+            Route anything. <strong>Trace nothing.</strong> Every site and game renders right here —
+            the desk never spawns a tab.
           </p>
 
           <SearchBar
@@ -259,10 +279,10 @@ export default function App() {
               <kbd>/</kbd> focus route bar
             </span>
             <span>
-              <kbd>↵</kbd> open tunnel
+              <kbd>↵</kbd> open in-page
             </span>
             <span>
-              <kbd>esc</kbd> kill player
+              <kbd>esc</kbd> kill session
             </span>
             {settings.panicEnabled && (
               <span>
@@ -273,13 +293,16 @@ export default function App() {
         </header>
 
         {category === "games" ? (
-          <GamesLibrary onLaunch={openPlayer} onCloak={(g) => void cloakGame(g)} />
+          <GamesLibrary
+            onLaunch={openPlayer}
+            onBrowse={(url) => void finishRoute(url, new URL(url).hostname, false)}
+          />
         ) : (
           <ShortcutGrid
             category={category}
             routingId={routingId}
             onOpen={(s) => void handleRoute(s.url, s)}
-            onCloak={handleCloak}
+            onStealth={(s) => void handleStealth(s)}
           />
         )}
       </main>
@@ -291,6 +314,7 @@ export default function App() {
         clock={clock.toLocaleTimeString("en-US", { hour12: false })}
         panicEnabled={settings.panicEnabled}
         onPanic={panic}
+        onBrowse={(url) => void finishRoute(url, new URL(url).hostname, false)}
       />
 
       <SettingsModal
@@ -299,6 +323,14 @@ export default function App() {
         onPatch={(patch) => setSettings((s) => ({ ...s, ...patch }))}
         onClose={() => setSettingsOpen(false)}
       />
+
+      {browser && (
+        <BrowserOverlay
+          session={browser}
+          engineLabel={ENGINES[settings.engine].label}
+          onDestroy={destroyBrowser}
+        />
+      )}
 
       {player && (
         <GamePlayer

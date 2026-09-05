@@ -111,6 +111,13 @@ export const CompressIcon = ({ size, ...p }: P) => (
   </svg>
 );
 
+export const CopyIcon = ({ size, ...p }: P) => (
+  <svg {...base(size)} {...p}>
+    <rect x="9" y="9" width="11" height="11" rx="2.5" />
+    <path d="M5.5 14.5A1.5 1.5 0 0 1 4 13V5.5A1.5 1.5 0 0 1 5.5 4H13a1.5 1.5 0 0 1 1.5 1.5" />
+  </svg>
+);
+
 /* ---------- Brand marks (filled, simplified) ---------- */
 
 export const DiscordMark = ({ size, ...p }: P) => (
