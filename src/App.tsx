@@ -11,6 +11,7 @@ import {
   attachBridge,
   ENGINES,
   HANDSHAKE_STAGES,
+  isDeployed,
   normalizeInput,
   resolveThrough,
   simulateTunnel,
@@ -320,7 +321,14 @@ export default function App() {
       <SettingsModal
         open={settingsOpen}
         settings={settings}
-        onPatch={(patch) => setSettings((s) => ({ ...s, ...patch }))}
+        onPatch={(patch) => {
+          setSettings((s) => ({ ...s, ...patch }));
+          if (patch.engine && !isDeployed(patch.engine)) {
+            showToast(`${ENGINES[patch.engine].label} armed · embedded frame until deployed`);
+          } else if (patch.engine) {
+            showToast(`${ENGINES[patch.engine].label} engaged`);
+          }
+        }}
         onClose={() => setSettingsOpen(false)}
       />
 
@@ -328,6 +336,7 @@ export default function App() {
         <BrowserOverlay
           session={browser}
           engineLabel={ENGINES[settings.engine].label}
+          deployed={isDeployed(settings.engine)}
           onDestroy={destroyBrowser}
         />
       )}

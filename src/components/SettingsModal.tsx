@@ -1,5 +1,5 @@
 import { useEffect } from "react";
-import { ENGINES, type EngineId } from "../lib/proxy";
+import { ENGINES, isDeployed, type EngineId } from "../lib/proxy";
 import { CLOAKS, PANIC_TARGETS, type CloakId, type SettingsState } from "../lib/settings";
 import { BoltIcon, CloseIcon, GlobeIcon, ShieldIcon } from "./icons";
 
@@ -10,7 +10,7 @@ interface Props {
   onClose: () => void;
 }
 
-const ENGINE_ORDER: EngineId[] = ["ultraviolet", "baremux", "rammerhead"];
+const ENGINE_ORDER: EngineId[] = ["embedded", "ultraviolet", "baremux", "rammerhead"];
 
 export default function SettingsModal({ open, settings, onPatch, onClose }: Props) {
   useEffect(() => {
@@ -49,12 +49,15 @@ export default function SettingsModal({ open, settings, onPatch, onClose }: Prop
         <section className="sd-section" style={{ borderTop: "none", paddingTop: 0 }}>
           <div className="sd-section-label">Proxy engine</div>
           <p className="sd-section-desc">
-            Transport used by the route bar, shortcut cards and the game player. Swap engines live — no reload needed.
+            Transport used by the route bar, shortcut cards, the game player and the in-page browser.
+            Slots activate the moment a deployment registers its <code>wrap</code> — until then they
+            fall back to the embedded frame.
           </p>
           <div className="sd-engine-grid">
             {ENGINE_ORDER.map((id) => {
               const e = ENGINES[id];
               const on = settings.engine === id;
+              const live = isDeployed(id);
               return (
                 <button
                   key={id}
@@ -65,6 +68,9 @@ export default function SettingsModal({ open, settings, onPatch, onClose }: Prop
                   <b>
                     {on && <span className="on-dot" aria-hidden />}
                     {e.label}
+                    <span className={`sd-engine-state${live ? " is-live" : ""}`}>
+                      {live ? "live" : "awaiting deploy"}
+                    </span>
                   </b>
                   <span>{e.detail}</span>
                 </button>

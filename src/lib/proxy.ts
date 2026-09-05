@@ -2,68 +2,83 @@
    ScribeDesk — Proxy Bridge
    ------------------------------------------------------------
    Single routing seam between the UI (route bar, app cards,
-   game tiles, player viewport) and a backend proxy transport.
+   game tiles, player viewport, in-page browser) and a backend
+   proxy transport.
 
-   EVERY navigation on the desk flows through `resolveThrough`,
-   which rewrites the destination via the active engine's prefix.
-   Raw destinations are never opened.
+   EVERY navigation on the desk flows through `resolveThrough`.
+   Nothing ever opens in a tab.
 
-   Wiring a real deployment = change one prefix (or `wrap`):
-     Ultraviolet → "/service/uv/"   (UV's default __uv prefix)
-     Bare-Mux    → "/baremux/"      (channel-served transport)
-     Rammerhead  → "/rammerhead/"   (session-persistent)
+   Transports:
+     embedded    — ships working. Frames the destination directly
+                   inside the on-page viewport. Handles every
+                   iframe-friendly target (game ports, docs, igu
+                   Google). Sites that send X-Frame-Options need
+                   a deployed engine to route around it.
+     ultraviolet — slot. Deploy UV on this origin, then activate:
+                     registerEngine({ id: "ultraviolet",
+                       wrap: (u) => `/service/uv/${encode(u)}` })
+     baremux     — slot. Open a BareMux channel in `wrap`.
+     rammerhead  — slot. Bind a Rammerhead session in `wrap`.
+
+   Undeployed slots fall back to `embedded` — the desk never
+   routes into a dead path.
    ============================================================ */
 
-export type EngineId = "ultraviolet" | "baremux" | "rammerhead";
+export type EngineId = "embedded" | "ultraviolet" | "baremux" | "rammerhead";
 
 export interface ProxyEngine {
   id: EngineId;
   label: string;
   detail: string;
-  prefix: string;
   /**
    * Transform a fully-qualified destination URL into the proxied URL.
-   * Swap the body to plug in a real codec, e.g.:
-   *   wrap: (url) => `${location.origin}/service/${UltravioletCodec.xor.encode(url)}`
+   * `null` = integration slot awaiting deployment (falls back to
+   * the embedded transport until `registerEngine` provides a wrap).
    */
-  wrap: (url: string) => string;
+  wrap: ((url: string) => string) | null;
 }
 
-const viaPrefix = (prefix: string) => (url: string) => `${prefix}${url}`;
-
 export const ENGINES: Record<EngineId, ProxyEngine> = {
+  embedded: {
+    id: "embedded",
+    label: "Embedded",
+    detail: "in-page frame · ships working",
+    wrap: (url) => url,
+  },
   ultraviolet: {
     id: "ultraviolet",
     label: "Ultraviolet",
-    detail: "service-worker interceptor · recommended",
-    prefix: "/service/uv/",
-    wrap: viaPrefix("/service/uv/"),
+    detail: "slot · service-worker interceptor",
+    wrap: null,
   },
   baremux: {
     id: "baremux",
     label: "Bare-Mux",
-    detail: "websocket multiplexer · low overhead",
-    prefix: "/baremux/",
-    wrap: viaPrefix("/baremux/"),
+    detail: "slot · websocket multiplexer",
+    wrap: null,
   },
   rammerhead: {
     id: "rammerhead",
     label: "Rammerhead",
-    detail: "session-persistent · good for games",
-    prefix: "/rammerhead/",
-    wrap: viaPrefix("/rammerhead/"),
+    detail: "slot · session-persistent",
+    wrap: null,
   },
 };
 
 const customEngines = new Map<string, ProxyEngine>();
 
-/** Runtime registration — external scripts can inject engines without rebuilding. */
+/** Runtime registration — deploys an engine (or overrides any slot) without rebuilding. */
 export function registerEngine(engine: ProxyEngine): void {
   customEngines.set(engine.id, engine);
 }
 
 export function getEngine(id: string): ProxyEngine {
-  return customEngines.get(id) ?? ENGINES[id as EngineId] ?? ENGINES.ultraviolet;
+  return customEngines.get(id) ?? ENGINES[id as EngineId] ?? ENGINES.embedded;
+}
+
+/** A slot is live once it has a real `wrap` (built-in or registered). */
+export function isDeployed(id: string): boolean {
+  return (customEngines.get(id)?.wrap ?? ENGINES[id as EngineId]?.wrap ?? null) !== null;
 }
 
 /* ---------- Input normalization ---------- */
@@ -74,7 +89,8 @@ const DOMAIN_RE = /^[\w-]+(\.[\w-]+)+(\/[^\s]*)?$/i;
 
 export function normalizeInput(raw: string): RouteIntent {
   const input = raw.trim();
-  if (!input) return { kind: "search", url: "https://www.google.com/", display: "google.com" };
+  if (!input)
+    return { kind: "search", url: "https://www.google.com/webhp?igu=1", display: "google.com" };
 
   if (/^https?:\/\//i.test(input)) {
     const u = new URL(input);
@@ -85,14 +101,20 @@ export function normalizeInput(raw: string): RouteIntent {
   }
   return {
     kind: "search",
-    url: `https://www.google.com/search?q=${encodeURIComponent(input)}`,
+    // igu=1 lets Google render inside an in-page frame.
+    url: `https://www.google.com/search?igu=1&q=${encodeURIComponent(input)}`,
     display: "google.com/search",
   };
 }
 
-/** The one true gateway: rewrite `url` through the selected engine. Never bypass. */
+/**
+ * The one true gateway: rewrite `url` through the selected engine.
+ * Never bypassed, never opens a tab. Undeployed slots resolve via
+ * the embedded transport so the frame always lands somewhere real.
+ */
 export function resolveThrough(engineId: string, url: string): string {
-  return getEngine(engineId).wrap(url);
+  const engine = getEngine(engineId);
+  return engine.wrap ? engine.wrap(url) : url;
 }
 
 /* ---------- In-page policy ----------

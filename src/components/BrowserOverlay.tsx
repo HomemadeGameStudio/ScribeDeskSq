@@ -21,6 +21,8 @@ export interface BrowserSession {
 interface Props {
   session: BrowserSession;
   engineLabel: string;
+  /** Whether the active engine has a real transport (or is the embedded frame). */
+  deployed: boolean;
   onDestroy: () => void;
 }
 
@@ -35,7 +37,7 @@ function shortUrl(raw: string): string {
   }
 }
 
-export default function BrowserOverlay({ session, engineLabel, onDestroy }: Props) {
+export default function BrowserOverlay({ session, engineLabel, deployed, onDestroy }: Props) {
   const { label, url, proxied, stealth, key } = session;
 
   const [closing, setClosing] = useState(false);
@@ -176,7 +178,7 @@ export default function BrowserOverlay({ session, engineLabel, onDestroy }: Prop
 
           <span className={`sd-player-status is-${loaded ? "live" : "loading"}`} role="status">
             <span className="sd-player-dot" aria-hidden />
-            {loaded ? "live" : "tunneling"}
+            {loaded ? "live" : deployed ? "tunneling" : "loading"}
             {loaded && <span className="sd-player-timer">{mins}:{secs}</span>}
           </span>
 
@@ -224,7 +226,9 @@ export default function BrowserOverlay({ session, engineLabel, onDestroy }: Prop
 
           <div className={`sd-player-load${loaded ? " is-done" : ""}`}>
             <span className="sd-player-ring" aria-hidden />
-            <span className="sd-player-load-title">Establishing tunnel</span>
+            <span className="sd-player-load-title">
+              {deployed ? "Establishing tunnel" : "Framing destination"}
+            </span>
             <span className="sd-player-load-sub">
               {engineLabel.toLowerCase()} · {shortUrl(url)}
             </span>
@@ -240,6 +244,11 @@ export default function BrowserOverlay({ session, engineLabel, onDestroy }: Prop
           <span className="sd-player-url" title={url}>
             {url}
           </span>
+          {!deployed && (
+            <span className="sd-browser-note">
+              embedded frame — sites that refuse framing need a live engine
+            </span>
+          )}
           <span className="sd-player-hints">
             <span><kbd>esc</kbd>close</span>
             <span><kbd>F</kbd>fullscreen</span>

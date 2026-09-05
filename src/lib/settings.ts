@@ -10,7 +10,7 @@ export interface SettingsState {
 }
 
 export const DEFAULT_SETTINGS: SettingsState = {
-  engine: "ultraviolet",
+  engine: "embedded",
   cloak: "none",
   panicEnabled: true,
   panicTarget: "classroom",
@@ -30,7 +30,7 @@ export const PANIC_TARGETS: Record<SettingsState["panicTarget"], { label: string
   gmail: { label: "Gmail", url: "https://mail.google.com/" },
 };
 
-const KEY = "scribedesk:settings:v2";
+const KEY = "scribedesk:settings:v3";
 
 export function loadSettings(): SettingsState {
   try {
