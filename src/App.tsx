@@ -160,9 +160,9 @@ export default function App() {
   const resolveInto = (game: RemoteGame) => {
     resolveGameEntry(game)
       .then((entry) => {
-        const proxied = { ...entry, url: resolveThrough(settingsRef.current.engine, entry.url) };
+        // The player owns the mirror ladder + engine wrap from here.
         setPlayer((p) =>
-          p && p.game.slug === game.slug && !p.entry && !p.error ? { ...p, entry: proxied } : p
+          p && p.game.slug === game.slug && !p.entry && !p.error ? { ...p, entry } : p
         );
       })
       .catch((err: unknown) => {
@@ -346,6 +346,7 @@ export default function App() {
       {player && (
         <GamePlayer
           session={player}
+          engineId={settings.engine}
           engineLabel={ENGINES[settings.engine].label}
           onDestroy={destroyPlayer}
           onRetry={retryPlayer}

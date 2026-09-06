@@ -28,7 +28,47 @@ export const REPO_BRANCH = "main";
 export const REPO_URL = `https://github.com/${REPO_OWNER}/${REPO_NAME}`;
 
 const TREES_URL = `https://api.github.com/repos/${REPO_OWNER}/${REPO_NAME}/git/trees/${REPO_BRANCH}?recursive=0`;
-const CDN = "https://rawcdn.githack.com";
+
+/* ---------- CDN mirror ladder ----------
+   Game ports are huge; a single CDN can't be trusted to serve
+   every file. The player probes these in order and mounts the
+   first mirror that answers. Users can cycle mirrors manually
+   from the player footer. */
+
+export interface GameMirror {
+  id: string;
+  label: string;
+  build: (path: string) => string;
+}
+
+export const MIRRORS: GameMirror[] = [
+  {
+    id: "gitloaf",
+    label: "gitloaf",
+    build: (p) => `https://gitloaf.com/cdn/${REPO_OWNER}/${REPO_NAME}/${REPO_BRANCH}/${p}`,
+  },
+  {
+    id: "githack",
+    label: "raw.githack",
+    build: (p) => `https://raw.githack.com/${REPO_OWNER}/${REPO_NAME}/${REPO_BRANCH}/${p}`,
+  },
+  {
+    id: "statically",
+    label: "statically",
+    build: (p) => `https://cdn.statically.io/gh/${REPO_OWNER}/${REPO_NAME}/${REPO_BRANCH}/${p}`,
+  },
+  {
+    id: "rawcdn",
+    label: "rawcdn",
+    build: (p) => `https://rawcdn.githack.com/${REPO_OWNER}/${REPO_NAME}/${REPO_BRANCH}/${p}`,
+  },
+];
+
+export function probeHead(url: string): Promise<boolean> {
+  return fetch(url, { method: "HEAD" })
+    .then((res) => res.ok)
+    .catch(() => false);
+}
 
 /** Folders that are infrastructure, not games. */
 const IGNORED = new Set(["repo", ".github", "assets"]);
@@ -195,29 +235,20 @@ export async function fetchGames(): Promise<FetchResult> {
   return { games, cached: false };
 }
 
-/* ---------- entry resolution (all file types) ---------- */
+/* ---------- entry resolution (all file types) ----------
+   Resolution is mirror-agnostic: it returns the *relative* entry
+   file inside the port folder. The player then asks the mirror
+   ladder to serve `slug/file`. */
 
 export type EntryKind = "html" | "swf" | "unsupported";
 
 export interface GameEntry {
-  url: string;
   kind: EntryKind;
-  /** File path inside the port folder, or a summary of found extensions. */
+  /** Entry file relative to the port folder, or a summary of found extensions. */
   file: string;
 }
 
-export function gameBaseUrl(game: RemoteGame): string {
-  return `${CDN}/${REPO_OWNER}/${REPO_NAME}/${REPO_BRANCH}/${game.slug}/`;
-}
-
-async function probe(url: string): Promise<boolean> {
-  try {
-    const res = await fetch(url, { method: "HEAD" });
-    return res.ok;
-  } catch {
-    return false;
-  }
-}
+const encodePath = (file: string) => file.split("/").map(encodeURIComponent).join("/");
 
 /** Lower = better document candidate. ≥5 = not executable in-browser. */
 function rank(path: string): number {
@@ -236,19 +267,19 @@ export async function resolveGameEntry(game: RemoteGame): Promise<GameEntry> {
   const hit = entryCache.get(game.slug);
   if (hit) return hit;
 
-  const base = gameBaseUrl(game);
-
-  /* Fast path — the two conventional entry files. */
+  /* Fast path — the two conventional entry files, probed across
+     the whole mirror ladder so one dead CDN can't block a game. */
   for (const f of ["index.html", "index.htm"]) {
-    if (await probe(base + f)) {
-      const entry: GameEntry = { url: base + f, kind: "html", file: f };
-      entryCache.set(game.slug, entry);
-      return entry;
+    for (const m of MIRRORS) {
+      if (await probeHead(m.build(`${game.slug}/${f}`))) {
+        const entry: GameEntry = { kind: "html", file: f };
+        entryCache.set(game.slug, entry);
+        return entry;
+      }
     }
   }
 
-  /* Slow path — list the port folder and pick the best executable file,
-     including entries nested in sub-folders. */
+  /* Slow path — list the port folder and pick the best executable file. */
   let entry: GameEntry;
   try {
     const res = await fetch(
@@ -266,16 +297,12 @@ export async function resolveGameEntry(game: RemoteGame): Promise<GameEntry> {
     if (candidates.length > 0) {
       const file = candidates[0].path;
       const kind: EntryKind = file.toLowerCase().endsWith(".swf") ? "swf" : "html";
-      entry = {
-        url: base + file.split("/").map(encodeURIComponent).join("/"),
-        kind,
-        file,
-      };
+      entry = { kind, file: encodePath(file) };
     } else {
       const exts = blobs.length
         ? [...new Set(blobs.map((b) => `.${b.path.split(".").pop() ?? "?"}`))].slice(0, 4).join(" ")
         : "empty folder";
-      entry = { url: base, kind: "unsupported", file: exts };
+      entry = { kind: "unsupported", file: exts };
     }
   } catch {
     throw new Error(`no entry found under /${game.slug}`);

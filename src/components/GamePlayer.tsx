@@ -1,17 +1,24 @@
 import { useCallback, useEffect, useRef, useState } from "react";
 import type { CSSProperties } from "react";
-import { ruffleDocument, type GameEntry, type RemoteGame } from "../lib/games";
+import { MIRRORS, probeHead, ruffleDocument, type GameEntry, type RemoteGame } from "../lib/games";
+import { resolveThrough } from "../lib/proxy";
 import { CloseIcon, CompressIcon, ExpandIcon, RefreshIcon, ShieldIcon } from "./icons";
 
 /* ============================================================
    In-page player session.
    One iframe payload at a time — clicking a different tile swaps
-   the session object and the `src`/`srcDoc`; the page never
-   navigates and no tab is ever spawned. Closing nulls the iframe
-   src (kills audio/processes) and unmounts the frame.
+   the session and the frame; the page never navigates, no tab is
+   ever spawned. Closing nulls the iframe src so audio/processes
+   die instantly.
 
-   Supports every resolvable payload type:
-     html → direct frame · swf → Ruffle shim · other → surfaced
+   Payload pipeline:
+     1. entry resolution → relative file inside the port folder
+     2. mirror ladder    → probe raw.githack → gitloaf →
+        statically → rawcdn, mount the first CDN that answers
+     3. engine wrap      → resolveThrough (embedded by default)
+
+   The loader is dismissible: huge ports take minutes to fire
+   `load`, so a click reveals the frame early to watch progress.
    ============================================================ */
 
 export interface PlayerSession {
@@ -25,6 +32,7 @@ export interface PlayerSession {
 
 interface Props {
   session: PlayerSession;
+  engineId: string;
   engineLabel: string;
   onDestroy: () => void;
   onRetry: (game: RemoteGame) => void;
@@ -38,6 +46,9 @@ const STATUS_LABEL: Record<Status, string> = {
   live: "live",
   error: "failed",
 };
+
+/** Seconds before hinting that the loader can be dismissed. */
+const SLOW_HINT_S = 8;
 
 function fmt(elapsed: number): string {
   const m = Math.floor(elapsed / 60).toString().padStart(2, "0");
@@ -55,11 +66,17 @@ function shortUrl(url: string): string {
   }
 }
 
-export default function GamePlayer({ session, engineLabel, onDestroy, onRetry }: Props) {
+export default function GamePlayer({ session, engineId, engineLabel, onDestroy, onRetry }: Props) {
   const { game, entry, error, stealth, key } = session;
 
   const [closing, setClosing] = useState(false);
   const [loaded, setLoaded] = useState(false);
+  const [revealed, setRevealed] = useState(false);
+  const [slowHint, setSlowHint] = useState(false);
+  const [frameUrl, setFrameUrl] = useState<string | null>(null);
+  const [mirrorIdx, setMirrorIdx] = useState(0);
+  const [ladderFailed, setLadderFailed] = useState(false);
+  const [ladderTick, setLadderTick] = useState(0);
   const [isFs, setIsFs] = useState(false);
   const [spin, setSpin] = useState(false);
   const [elapsed, setElapsed] = useState(0);
@@ -71,16 +88,54 @@ export default function GamePlayer({ session, engineLabel, onDestroy, onRetry }:
   const closingRef = useRef(false);
 
   const unsupported = entry?.kind === "unsupported";
-  const status: Status = error || unsupported ? "error" : !entry ? "locating" : loaded ? "live" : "loading";
   const playable = !!entry && entry.kind !== "unsupported";
+  const loaderGone = loaded || revealed;
+  const status: Status =
+    error || unsupported || ladderFailed ? "error" : !entry ? "locating" : loaded ? "live" : "loading";
 
-  /* Fresh session (or newly resolved entry) → reset the frame state. */
+  /* ---------- mirror ladder: probe CDNs, mount the first that serves ---------- */
   useEffect(() => {
+    setFrameUrl(null);
     setLoaded(false);
+    setRevealed(false);
+    setSlowHint(false);
+    setLadderFailed(false);
     setElapsed(0);
+    setMirrorIdx(0);
     setClosing(false);
     closingRef.current = false;
-  }, [key, entry?.url]);
+
+    if (!entry || entry.kind === "unsupported") return;
+
+    let cancelled = false;
+    const path = `${game.slug}/${entry.file}`;
+
+    (async () => {
+      for (let i = 0; i < MIRRORS.length; i++) {
+        if (cancelled) return;
+        const ok = await probeHead(MIRRORS[i].build(path));
+        if (cancelled) return;
+        if (ok) {
+          setMirrorIdx(i);
+          setFrameUrl(resolveThrough(engineId, MIRRORS[i].build(path)));
+          return;
+        }
+      }
+      if (!cancelled) setLadderFailed(true);
+    })();
+
+    return () => {
+      cancelled = true;
+    };
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [key, entry, ladderTick]);
+
+  /* Heavy ports stall long before `load` fires — offer the reveal early. */
+  useEffect(() => {
+    if (!frameUrl || loaderGone) return;
+    const id = window.setTimeout(() => setSlowHint(true), SLOW_HINT_S * 1000);
+    return () => window.clearTimeout(id);
+  }, [frameUrl, loaderGone, reloadKey]);
 
   /* Session clock while live. */
   useEffect(() => {
@@ -132,9 +187,26 @@ export default function GamePlayer({ session, engineLabel, onDestroy, onRetry }:
     setSpin(true);
     window.setTimeout(() => setSpin(false), 650);
     setLoaded(false);
+    setRevealed(false);
+    setSlowHint(false);
     setElapsed(0);
     setReloadKey((k) => k + 1);
   }, [playable]);
+
+  /* Manual mirror switch — mounts immediately, no probing. */
+  const cycleMirror = useCallback(() => {
+    if (!entry || entry.kind === "unsupported") return;
+    const next = (mirrorIdx + 1) % MIRRORS.length;
+    const path = `${game.slug}/${entry.file}`;
+    setMirrorIdx(next);
+    setFrameUrl(resolveThrough(engineId, MIRRORS[next].build(path)));
+    setLoaded(false);
+    setRevealed(false);
+    setSlowHint(false);
+    setLadderFailed(false);
+    setElapsed(0);
+    setReloadKey((k) => k + 1);
+  }, [entry, mirrorIdx, game.slug, engineId]);
 
   /* Fullscreen tracking. */
   useEffect(() => {
@@ -143,7 +215,7 @@ export default function GamePlayer({ session, engineLabel, onDestroy, onRetry }:
     return () => document.removeEventListener("fullscreenchange", onFs);
   }, []);
 
-  /* Keys: Esc close · F fullscreen · R reload */
+  /* Keys: Esc close · F fullscreen · R reload · M mirror */
   useEffect(() => {
     const onKey = (e: KeyboardEvent) => {
       if (e.metaKey || e.ctrlKey || e.altKey) return;
@@ -157,11 +229,18 @@ export default function GamePlayer({ session, engineLabel, onDestroy, onRetry }:
       } else if (e.key.toLowerCase() === "r") {
         e.preventDefault();
         reload();
+      } else if (e.key.toLowerCase() === "m") {
+        e.preventDefault();
+        cycleMirror();
       }
     };
     window.addEventListener("keydown", onKey);
     return () => window.removeEventListener("keydown", onKey);
-  }, [close, toggleFs, reload]);
+  }, [close, toggleFs, reload, cycleMirror]);
+
+  const revealLoader = () => {
+    if (frameUrl && !loaderGone) setRevealed(true);
+  };
 
   return (
     <div
@@ -238,14 +317,12 @@ export default function GamePlayer({ session, engineLabel, onDestroy, onRetry }:
 
         {/* ---------- viewport ---------- */}
         <div className="sd-player-view">
-          {playable && entry && (
+          {playable && frameUrl && (
             <iframe
               key={`${key}-${reloadKey}`}
               ref={iframeRef}
-              {...(entry.kind === "swf"
-                ? { srcDoc: ruffleDocument(entry.url) }
-                : { src: entry.url })}
-              className={loaded ? "is-live" : ""}
+              {...(entry?.kind === "swf" ? { srcDoc: ruffleDocument(frameUrl) } : { src: frameUrl })}
+              className={loaderGone ? "is-live" : ""}
               onLoad={() => setLoaded(true)}
               title={game.name}
               allow="fullscreen; gamepad; pointer-lock; autoplay; clipboard-write"
@@ -253,34 +330,57 @@ export default function GamePlayer({ session, engineLabel, onDestroy, onRetry }:
             />
           )}
 
-          <div className={`sd-player-load${status === "live" ? " is-done" : ""}${status === "error" ? " is-error" : ""}`}>
+          <div
+            className={`sd-player-load${loaderGone ? " is-done" : ""}${status === "error" ? " is-error" : ""}${
+              frameUrl && status !== "error" ? " has-frame" : ""
+            }`}
+            onClick={revealLoader}
+            role={frameUrl && status !== "error" ? "button" : undefined}
+            aria-label={frameUrl && status !== "error" ? "Dismiss loader and reveal the game frame" : undefined}
+          >
             {status === "error" ? (
               <>
-                <span className="sd-player-load-title">Port unreachable</span>
+                <span className="sd-player-load-title">
+                  {unsupported ? "Unsupported port" : ladderFailed ? "Every mirror failed" : "Port unreachable"}
+                </span>
                 <span className="sd-player-load-sub">
                   {unsupported
                     ? `can't execute ${entry?.file ?? "nothing"} in-browser`
-                    : error ?? "no entry file found"}
+                    : ladderFailed
+                      ? `no CDN would serve /${game.slug}/${entry?.file ?? "index.html"} — switch mirrors or retry`
+                      : error ?? "no entry file found"}
                 </span>
-                {!unsupported && (
-                  <button className="sd-player-retry" onClick={() => onRetry(game)}>
-                    retry resolve
-                  </button>
+                {ladderFailed ? (
+                  <span className="sd-err-row">
+                    <button className="sd-player-retry" onClick={cycleMirror}>
+                      switch mirror
+                    </button>
+                    <button className="sd-player-retry" onClick={() => setLadderTick((t) => t + 1)}>
+                      retry ladder
+                    </button>
+                  </span>
+                ) : (
+                  !unsupported && (
+                    <button className="sd-player-retry" onClick={() => onRetry(game)}>
+                      retry resolve
+                    </button>
+                  )
                 )}
               </>
             ) : (
               <>
                 <span className="sd-player-ring" aria-hidden />
                 <span className="sd-player-load-title">
-                  {status === "locating" ? "Locating port" : "Establishing session"}
+                  {!entry ? "Locating port" : frameUrl ? "Streaming port" : "Probing mirrors"}
                 </span>
                 <span className="sd-player-load-sub">
-                  {status === "locating"
+                  {!entry
                     ? `sniffing /${game.slug} for playable files`
-                    : `${engineLabel.toLowerCase()} tunnel · ${
-                        entry?.kind === "swf" ? "ruffle flash shim" : "rawcdn mirror"
-                      }`}
+                    : `${MIRRORS[mirrorIdx].label} mirror · ${engineLabel.toLowerCase()} tunnel`}
                 </span>
+                {slowHint && frameUrl && (
+                  <span className="sd-player-load-hint">large ports take a while — click to reveal the frame</span>
+                )}
               </>
             )}
           </div>
@@ -292,13 +392,23 @@ export default function GamePlayer({ session, engineLabel, onDestroy, onRetry }:
             <span className="dot" aria-hidden />
             {engineLabel}
           </span>
-          <span className="sd-player-url" title={entry?.url}>
-            {entry && playable ? shortUrl(entry.url) : "resolving entry…"}
+          <button
+            className="sd-mirror-chip"
+            onClick={cycleMirror}
+            disabled={!playable}
+            title="Switch CDN mirror (M)"
+            aria-label={`CDN mirror: ${MIRRORS[mirrorIdx].label}. Click to switch.`}
+          >
+            mirror · {MIRRORS[mirrorIdx].label}
+          </button>
+          <span className="sd-player-url" title={frameUrl ?? undefined}>
+            {frameUrl ? shortUrl(frameUrl) : "resolving entry…"}
           </span>
           <span className="sd-player-hints">
             <span><kbd>esc</kbd>close</span>
             <span><kbd>F</kbd>fullscreen</span>
             <span><kbd>R</kbd>reload</span>
+            <span><kbd>M</kbd>mirror</span>
           </span>
         </footer>
       </div>

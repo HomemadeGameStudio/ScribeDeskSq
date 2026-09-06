@@ -660,6 +660,32 @@ button:focus-visible, a:focus-visible, input:focus-visible {
 }
 .sd-player-engine { display: flex; align-items: center; gap: 7px; flex: none; text-transform: uppercase; letter-spacing: 0.14em; }
 .sd-player-engine .dot { width: 6px; height: 6px; border-radius: 50%; background: var(--ember); box-shadow: 0 0 8px rgba(255, 106, 61, 0.8); }
+
+.sd-mirror-chip {
+  flex: none; display: inline-flex; align-items: center; gap: 7px;
+  font-family: var(--font-mono); font-size: 9.5px; letter-spacing: 0.12em; text-transform: uppercase;
+  color: var(--muted); padding: 6px 12px; border-radius: 999px;
+  border: 1px solid var(--line); background: rgba(255, 255, 255, 0.04);
+  transition: color 0.25s, border-color 0.25s, background 0.25s, transform 0.3s var(--ease-spring);
+}
+.sd-mirror-chip:hover:not(:disabled) {
+  color: var(--ember-2); border-color: rgba(255, 182, 72, 0.45); background: rgba(255, 182, 72, 0.08);
+  transform: translateY(-1px);
+}
+.sd-mirror-chip:active:not(:disabled) { transform: scale(0.96); }
+.sd-mirror-chip:disabled { opacity: 0.35; pointer-events: none; }
+
+.sd-err-row { display: flex; gap: 10px; margin-top: 4px; flex-wrap: wrap; justify-content: center; }
+
+.sd-player-load.has-frame { cursor: pointer; }
+.sd-player-load-hint {
+  margin-top: 10px;
+  font-family: var(--font-mono); font-size: 10px; letter-spacing: 0.1em; text-transform: uppercase;
+  color: var(--warn);
+  border: 1px dashed rgba(255, 182, 72, 0.4); border-radius: 999px; padding: 7px 15px;
+  animation: hint-in 0.45s var(--ease-out) both;
+}
+@keyframes hint-in { from { opacity: 0; transform: translateY(8px); } }
 .sd-player-url {
   flex: 1; min-width: 0; white-space: nowrap; overflow: hidden; text-overflow: ellipsis;
   color: var(--muted);
