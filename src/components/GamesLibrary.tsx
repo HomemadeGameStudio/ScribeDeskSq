@@ -1,7 +1,100 @@
 import { useCallback, useEffect, useState } from "react";
 import type { CSSProperties } from "react";
 import { fetchGames, REPO_URL, type RemoteGame } from "../lib/games";
+import { artVariant, coverArt } from "../lib/gameArt";
 import { GamepadIcon, RefreshIcon, ShieldIcon } from "./icons";
+
+/* ---------- one shelf tile, with cover art + procedural emblem ---------- */
+
+function GameTile({
+  game,
+  index,
+  busy,
+  onLaunch,
+  onCloak,
+}: {
+  game: RemoteGame;
+  index: number;
+  busy: boolean;
+  onLaunch: (game: RemoteGame) => void;
+  onCloak: (game: RemoteGame) => void;
+}) {
+  const art = coverArt(game.slug);
+  const [artState, setArtState] = useState<"loading" | "in" | "failed">(art ? "loading" : "failed");
+
+  return (
+    <button
+      className={`sd-game-tile${busy ? " is-busy" : ""}`}
+      style={
+        {
+          "--hue": game.hue,
+          "--hue2": (game.hue + 46) % 360,
+          "--pat": artVariant(game.slug),
+          animationDelay: `${Math.min(index, 11) * 45}ms`,
+        } as CSSProperties
+      }
+      onClick={() => onLaunch(game)}
+      aria-label={`Launch ${game.name} in the in-page player`}
+    >
+      {art && artState !== "failed" && (
+        <img
+          className={`sd-tile-img${artState === "in" ? " is-in" : ""}`}
+          src={art}
+          alt=""
+          loading="lazy"
+          referrerPolicy="no-referrer"
+          onLoad={() => setArtState("in")}
+          onError={() => setArtState("failed")}
+        />
+      )}
+      <span className="sd-tile-emblem" aria-hidden />
+      <span className="sd-tile-shade" aria-hidden />
+      <span className="sd-tile-ghost" aria-hidden>
+        {game.name.charAt(0)}
+      </span>
+
+      <span className="sd-tile-top">
+        <span className="sd-tile-mono" aria-hidden>
+          {game.name.charAt(0)}
+        </span>
+        <span className="sd-tile-tag">web port</span>
+      </span>
+
+      <span className="sd-tile-bottom">
+        <span>
+          <span className="sd-tile-name">{game.name}</span>
+          <span className="sd-tile-slug">/{game.slug}</span>
+        </span>
+        <span className="sd-tile-play" aria-hidden>
+          <svg width="13" height="13" viewBox="0 0 24 24" fill="currentColor">
+            <path d="M8 5.5v13l11-6.5Z" />
+          </svg>
+        </span>
+      </span>
+
+      <span
+        className="sd-tile-cloak"
+        role="button"
+        tabIndex={0}
+        title={`Stealth launch ${game.name} — in-page with tab identity cloaked`}
+        aria-label={`Stealth launch ${game.name}`}
+        onClick={(e) => {
+          e.stopPropagation();
+          onCloak(game);
+        }}
+        onKeyDown={(e) => {
+          if (e.key === "Enter" || e.key === " ") {
+            e.preventDefault();
+            e.stopPropagation();
+            onCloak(game);
+          }
+        }}
+      >
+        <ShieldIcon size={13} />
+      </span>
+    </button>
+  );
+}
 
 interface Props {
   onLaunch: (game: RemoteGame, stealth?: boolean) => void;
@@ -103,53 +196,14 @@ export default function GamesLibrary({ onLaunch, onBrowse }: Props) {
       {phase === "ready" && (
         <div className="sd-game-grid">
           {games.map((g, i) => (
-            <button
+            <GameTile
               key={g.slug}
-              className={`sd-game-tile${busySlug === g.slug ? " is-busy" : ""}`}
-              style={{ "--hue": g.hue, "--hue2": (g.hue + 46) % 360, animationDelay: `${Math.min(i, 11) * 45}ms` } as CSSProperties}
-              onClick={() => launch(g)}
-              aria-label={`Launch ${g.name} in the in-page player`}
-            >
-              <span className="sd-tile-top">
-                <span className="sd-tile-mono" aria-hidden>
-                  {g.name.charAt(0)}
-                </span>
-                <span className="sd-tile-tag">web port</span>
-              </span>
-
-              <span className="sd-tile-bottom">
-                <span>
-                  <span className="sd-tile-name">{g.name}</span>
-                  <span className="sd-tile-slug">/{g.slug}</span>
-                </span>
-                <span className="sd-tile-play" aria-hidden>
-                  <svg width="13" height="13" viewBox="0 0 24 24" fill="currentColor">
-                    <path d="M8 5.5v13l11-6.5Z" />
-                  </svg>
-                </span>
-              </span>
-
-              <span
-                className="sd-tile-cloak"
-                role="button"
-                tabIndex={0}
-                title={`Stealth launch ${g.name} — in-page with tab identity cloaked`}
-                aria-label={`Stealth launch ${g.name}`}
-                onClick={(e) => {
-                  e.stopPropagation();
-                  onLaunch(g, true);
-                }}
-                onKeyDown={(e) => {
-                  if (e.key === "Enter" || e.key === " ") {
-                    e.preventDefault();
-                    e.stopPropagation();
-                    onLaunch(g, true);
-                  }
-                }}
-              >
-                <ShieldIcon size={13} />
-              </span>
-            </button>
+              game={g}
+              index={i}
+              busy={busySlug === g.slug}
+              onLaunch={launch}
+              onCloak={(game) => onLaunch(game, true)}
+            />
           ))}
         </div>
       )}

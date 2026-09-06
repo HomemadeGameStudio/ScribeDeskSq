@@ -1,6 +1,7 @@
 import { useCallback, useEffect, useRef, useState } from "react";
 import type { CSSProperties } from "react";
 import { loadPort, mirrorLadder, MIRRORS, type PortPayload, type RemoteGame } from "../lib/games";
+import { coverArt } from "../lib/gameArt";
 import { CloseIcon, CompressIcon, ExpandIcon, RefreshIcon, ShieldIcon } from "./icons";
 
 /* ============================================================
@@ -72,6 +73,10 @@ export default function GamePlayer({ session, engineLabel, onDestroy }: Props) {
 
   const status: Status = error ? "error" : !payload ? "locating" : loaded ? "live" : "loading";
   const mirrorLabel = MIRRORS.find((m) => m.id === mirrorId)?.label ?? mirrorId;
+
+  const art = coverArt(game.slug);
+  const [artOk, setArtOk] = useState(true);
+  useEffect(() => setArtOk(true), [game.slug]);
 
   /* ---------- load the port ---------- */
   useEffect(() => {
@@ -222,6 +227,15 @@ export default function GamePlayer({ session, engineLabel, onDestroy }: Props) {
             aria-hidden
           >
             {game.name.charAt(0)}
+            {art && artOk && (
+              <img
+                className="sd-mono-img"
+                src={art}
+                alt=""
+                referrerPolicy="no-referrer"
+                onError={() => setArtOk(false)}
+              />
+            )}
           </span>
 
           <span className="sd-player-id">
