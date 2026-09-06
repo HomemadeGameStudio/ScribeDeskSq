@@ -539,6 +539,19 @@ button:focus-visible, a:focus-visible, input:focus-visible {
 @keyframes player-fade-in { from { opacity: 0; } }
 @keyframes player-fade-out { to { opacity: 0; } }
 
+/* The overlay root is what goes fullscreen — kill the translucent
+   backdrop + blur (nothing sits behind it anymore) so the session
+   owns the whole screen, solid. */
+.sd-player-overlay:fullscreen {
+  background: var(--bg);
+  backdrop-filter: none;
+  -webkit-backdrop-filter: none;
+  animation: none;
+}
+.sd-player-overlay:fullscreen .sd-player {
+  animation: none;
+}
+
 .sd-player {
   position: absolute; inset: 0;
   display: flex; flex-direction: column;

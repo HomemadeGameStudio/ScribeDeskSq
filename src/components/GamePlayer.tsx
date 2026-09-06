@@ -66,6 +66,7 @@ export default function GamePlayer({ session, engineLabel, onDestroy }: Props) {
   const [spin, setSpin] = useState(false);
   const [elapsed, setElapsed] = useState(0);
 
+  const overlayRef = useRef<HTMLDivElement>(null);
   const shellRef = useRef<HTMLDivElement>(null);
   const iframeRef = useRef<HTMLIFrameElement>(null);
   const closeRef = useRef<HTMLButtonElement>(null);
@@ -147,14 +148,21 @@ export default function GamePlayer({ session, engineLabel, onDestroy }: Props) {
     }, 210);
   }, [onDestroy]);
 
+  /* Fullscreen the overlay root — not the shell beneath the blur
+     layer (Chromium paints that black) — then fall back down the
+     chain if the host refuses each level. */
   const toggleFs = useCallback(() => {
     if (document.fullscreenElement) {
       document.exitFullscreen().catch(() => undefined);
-    } else {
-      shellRef.current?.requestFullscreen?.().catch(() => {
-        iframeRef.current?.requestFullscreen?.().catch(() => undefined);
-      });
+      return;
     }
+    overlayRef.current
+      ?.requestFullscreen?.()
+      .catch(() =>
+        iframeRef.current?.requestFullscreen?.().catch(() =>
+          document.documentElement.requestFullscreen?.().catch(() => undefined)
+        )
+      );
   }, []);
 
   const reload = useCallback(() => {
@@ -208,6 +216,7 @@ export default function GamePlayer({ session, engineLabel, onDestroy }: Props) {
 
   return (
     <div
+      ref={overlayRef}
       className={`sd-player-overlay${closing ? " is-closing" : ""}`}
       role="dialog"
       aria-modal="true"

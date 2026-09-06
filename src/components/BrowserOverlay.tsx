@@ -93,6 +93,7 @@ export default function BrowserOverlay({ session, engineId, onSwitchEngine, onDe
   const [reloadKey, setReloadKey] = useState(0);
   const [elapsed, setElapsed] = useState(0);
 
+  const overlayRef = useRef<HTMLDivElement>(null);
   const shellRef = useRef<HTMLDivElement>(null);
   const iframeRef = useRef<HTMLIFrameElement>(null);
   const closeRef = useRef<HTMLButtonElement>(null);
@@ -173,12 +174,18 @@ export default function BrowserOverlay({ session, engineId, onSwitchEngine, onDe
     window.setTimeout(onDestroy, 210);
   }, [onDestroy]);
 
+  /* Fullscreen the overlay root — not the shell beneath the blur
+     layer (Chromium paints that black) — then fall back down. */
   const toggleFs = useCallback(() => {
     if (document.fullscreenElement) {
       document.exitFullscreen().catch(() => undefined);
-    } else {
-      shellRef.current?.requestFullscreen?.().catch(() => undefined);
+      return;
     }
+    overlayRef.current
+      ?.requestFullscreen?.()
+      .catch(() =>
+        document.documentElement.requestFullscreen?.().catch(() => undefined)
+      );
   }, []);
 
   const reload = useCallback(() => {
@@ -265,6 +272,7 @@ export default function BrowserOverlay({ session, engineId, onSwitchEngine, onDe
 
   return (
     <div
+      ref={overlayRef}
       className={`sd-player-overlay${closing ? " is-closing" : ""}`}
       role="dialog"
       aria-modal="true"
