@@ -1,6 +1,6 @@
 import { useCallback, useEffect, useRef, useState } from "react";
 import type { CSSProperties } from "react";
-import { MIRRORS, probeHead, ruffleDocument, type GameEntry, type RemoteGame } from "../lib/games";
+import { MIRRORS, mirrorLadder, mirrorUrl, ruffleDocument, saveMirrorPref, type GameEntry, type RemoteGame } from "../lib/games";
 import { resolveThrough } from "../lib/proxy";
 import { CloseIcon, CompressIcon, ExpandIcon, RefreshIcon, ShieldIcon } from "./icons";
 
@@ -11,12 +11,14 @@ import { CloseIcon, CompressIcon, ExpandIcon, RefreshIcon, ShieldIcon } from "./
    ever spawned. Closing nulls the iframe src so audio/processes
    die instantly.
 
-   Payload pipeline:
-     1. entry resolution → relative file inside the port folder
-     2. mirror ladder    → probe raw.githack → gitloaf →
-        statically → rawcdn, mount the first CDN that answers
-     3. engine wrap      → resolveThrough (embedded by default)
-
+    Payload pipeline:
+      1. entry resolution → relative file inside the port folder,
+         with a mirror pre-picked by racing all CDNs in parallel
+         (hit / miss / can't-tell — an unprobed CDN still mounts)
+      2. mirror ladder    → gitloaf → raw.githack → statically →
+         jsdelivr; mounts instantly, cycle with M, unverified
+         stalls auto-advance once, working mirrors are remembered
+      3. engine wrap      → resolveThrough (embedded by default)
    The loader is dismissible: huge ports take minutes to fire
    `load`, so a click reveals the frame early to watch progress.
    ============================================================ */
@@ -74,7 +76,8 @@ export default function GamePlayer({ session, engineId, engineLabel, onDestroy, 
   const [revealed, setRevealed] = useState(false);
   const [slowHint, setSlowHint] = useState(false);
   const [frameUrl, setFrameUrl] = useState<string | null>(null);
-  const [mirrorIdx, setMirrorIdx] = useState(0);
+  const [mirrorId, setMirrorId] = useState<string>(MIRRORS[0].id);
+  const [stallNote, setStallNote] = useState<string | null>(null);
   const [ladderFailed, setLadderFailed] = useState(false);
   const [ladderTick, setLadderTick] = useState(0);
   const [isFs, setIsFs] = useState(false);
@@ -86,49 +89,77 @@ export default function GamePlayer({ session, engineId, engineLabel, onDestroy, 
   const iframeRef = useRef<HTMLIFrameElement>(null);
   const closeRef = useRef<HTMLButtonElement>(null);
   const closingRef = useRef(false);
+  const autoAdvancedRef = useRef(false);
 
   const unsupported = entry?.kind === "unsupported";
   const playable = !!entry && entry.kind !== "unsupported";
   const loaderGone = loaded || revealed;
+  const mirrorLabel = MIRRORS.find((m) => m.id === mirrorId)?.label ?? mirrorId;
   const status: Status =
     error || unsupported || ladderFailed ? "error" : !entry ? "locating" : loaded ? "live" : "loading";
 
-  /* ---------- mirror ladder: probe CDNs, mount the first that serves ---------- */
+  /* ---------- mirror ladder: mount immediately, no blocking probes ----------
+     resolveGameEntry already raced the CDNs in parallel and picked
+     one — verified (HEAD confirmed) or optimistic (probes couldn't
+     tell, but iframes don't need CORS). We mount it at once; the
+     user can cycle mirrors any time (M / footer chip), an unverified
+     mirror that stalls auto-advances once, and a mirror that
+     actually loads a game is remembered for next time. */
   useEffect(() => {
     setFrameUrl(null);
     setLoaded(false);
     setRevealed(false);
     setSlowHint(false);
+    setStallNote(null);
     setLadderFailed(false);
     setElapsed(0);
-    setMirrorIdx(0);
     setClosing(false);
     closingRef.current = false;
+    autoAdvancedRef.current = false;
 
-    if (!entry || entry.kind === "unsupported") return;
+    if (!entry || entry.kind === "unsupported") {
+      setMirrorId(MIRRORS[0].id);
+      return;
+    }
 
-    let cancelled = false;
-    const path = `${game.slug}/${entry.file}`;
-
-    (async () => {
-      for (let i = 0; i < MIRRORS.length; i++) {
-        if (cancelled) return;
-        const ok = await probeHead(MIRRORS[i].build(path));
-        if (cancelled) return;
-        if (ok) {
-          setMirrorIdx(i);
-          setFrameUrl(resolveThrough(engineId, MIRRORS[i].build(path)));
-          return;
-        }
-      }
-      if (!cancelled) setLadderFailed(true);
-    })();
-
-    return () => {
-      cancelled = true;
-    };
+    const order = mirrorLadder(game.slug);
+    const startId = entry.mirrorId && order.includes(entry.mirrorId) ? entry.mirrorId : order[0];
+    setMirrorId(startId);
+    setFrameUrl(resolveThrough(engineId, mirrorUrl(startId, game.slug, entry.file)));
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [key, entry, ladderTick]);
+
+  /* Manual mirror switch — mounts the next mirror immediately, no probing. */
+  const cycleMirror = useCallback(() => {
+    if (!entry || entry.kind === "unsupported") return;
+    const order = mirrorLadder(game.slug);
+    const next = order[(order.indexOf(mirrorId) + 1) % order.length];
+    setMirrorId(next);
+    setFrameUrl(resolveThrough(engineId, mirrorUrl(next, game.slug, entry.file)));
+    setLoaded(false);
+    setRevealed(false);
+    setSlowHint(false);
+    setStallNote(null);
+    setLadderFailed(false);
+    setElapsed(0);
+    setReloadKey((k) => k + 1);
+  }, [entry, mirrorId, game.slug, engineId]);
+
+  /* If a mirror we couldn't verify stalls before `load` fires,
+     advance to the next one once — dead-mirror recovery. */
+  useEffect(() => {
+    if (!frameUrl || loaderGone || ladderFailed) return;
+    if (entry?.verified !== false) return; // verified mirrors are trusted
+    if (autoAdvancedRef.current) return;
+    const id = window.setTimeout(() => {
+      autoAdvancedRef.current = true;
+      const label = MIRRORS.find((m) => m.id === mirrorId)?.label ?? "mirror";
+      setStallNote(`${label} stalled — switching mirror`);
+      cycleMirror();
+    }, 15000);
+    return () => window.clearTimeout(id);
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [frameUrl, loaderGone, ladderFailed, entry, mirrorId, cycleMirror]);
 
   /* Heavy ports stall long before `load` fires — offer the reveal early. */
   useEffect(() => {
@@ -192,21 +223,6 @@ export default function GamePlayer({ session, engineId, engineLabel, onDestroy, 
     setElapsed(0);
     setReloadKey((k) => k + 1);
   }, [playable]);
-
-  /* Manual mirror switch — mounts immediately, no probing. */
-  const cycleMirror = useCallback(() => {
-    if (!entry || entry.kind === "unsupported") return;
-    const next = (mirrorIdx + 1) % MIRRORS.length;
-    const path = `${game.slug}/${entry.file}`;
-    setMirrorIdx(next);
-    setFrameUrl(resolveThrough(engineId, MIRRORS[next].build(path)));
-    setLoaded(false);
-    setRevealed(false);
-    setSlowHint(false);
-    setLadderFailed(false);
-    setElapsed(0);
-    setReloadKey((k) => k + 1);
-  }, [entry, mirrorIdx, game.slug, engineId]);
 
   /* Fullscreen tracking. */
   useEffect(() => {
@@ -323,7 +339,11 @@ export default function GamePlayer({ session, engineId, engineLabel, onDestroy, 
               ref={iframeRef}
               {...(entry?.kind === "swf" ? { srcDoc: ruffleDocument(frameUrl) } : { src: frameUrl })}
               className={loaderGone ? "is-live" : ""}
-              onLoad={() => setLoaded(true)}
+              onLoad={() => {
+                setLoaded(true);
+                // This mirror demonstrably works for this game — remember it.
+                saveMirrorPref(game.slug, mirrorId);
+              }}
               title={game.name}
               allow="fullscreen; gamepad; pointer-lock; autoplay; clipboard-write"
               allowFullScreen
@@ -371,14 +391,15 @@ export default function GamePlayer({ session, engineId, engineLabel, onDestroy, 
               <>
                 <span className="sd-player-ring" aria-hidden />
                 <span className="sd-player-load-title">
-                  {!entry ? "Locating port" : frameUrl ? "Streaming port" : "Probing mirrors"}
+                  {!entry ? "Locating port" : "Streaming port"}
                 </span>
                 <span className="sd-player-load-sub">
                   {!entry
                     ? `sniffing /${game.slug} for playable files`
-                    : `${MIRRORS[mirrorIdx].label} mirror · ${engineLabel.toLowerCase()} tunnel`}
+                    : `${mirrorLabel} mirror${entry.verified === false ? " · optimistic" : ""} · ${engineLabel.toLowerCase()} tunnel`}
                 </span>
-                {slowHint && frameUrl && (
+                {stallNote && <span className="sd-player-load-hint">{stallNote}</span>}
+                {slowHint && frameUrl && !stallNote && (
                   <span className="sd-player-load-hint">large ports take a while — click to reveal the frame</span>
                 )}
               </>
@@ -397,9 +418,9 @@ export default function GamePlayer({ session, engineId, engineLabel, onDestroy, 
             onClick={cycleMirror}
             disabled={!playable}
             title="Switch CDN mirror (M)"
-            aria-label={`CDN mirror: ${MIRRORS[mirrorIdx].label}. Click to switch.`}
+            aria-label={`CDN mirror: ${mirrorLabel}. Click to switch.`}
           >
-            mirror · {MIRRORS[mirrorIdx].label}
+            mirror · {mirrorLabel}
           </button>
           <span className="sd-player-url" title={frameUrl ?? undefined}>
             {frameUrl ? shortUrl(frameUrl) : "resolving entry…"}

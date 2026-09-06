@@ -1,10 +1,10 @@
 /* ============================================================
    ScribeDesk — Games Registry
    ------------------------------------------------------------
-   Shelf listing → GitHub trees API (public, CORS-open) from
-     github.com/HomemadeGameStudio/lessons-moved-
-   Payloads      → rawcdn.githack.com (correct content types).
-
+    Shelf listing → GitHub trees API (public, CORS-open) from
+      github.com/HomemadeGameStudio/lessons-moved-
+    Payloads      → CDN mirror ladder (gitloaf → raw.githack →
+      statically → jsdelivr), raced in parallel per game.
    Entry resolution supports every playable file type a port
    can ship:
      1. index.html / index.htm            (HEAD probe, no API hit)
@@ -30,10 +30,21 @@ export const REPO_URL = `https://github.com/${REPO_OWNER}/${REPO_NAME}`;
 const TREES_URL = `https://api.github.com/repos/${REPO_OWNER}/${REPO_NAME}/git/trees/${REPO_BRANCH}?recursive=0`;
 
 /* ---------- CDN mirror ladder ----------
-   Game ports are huge; a single CDN can't be trusted to serve
-   every file. The player probes these in order and mounts the
-   first mirror that answers. Users can cycle mirrors manually
-   from the player footer. */
+   The repo is ~11 GB of game ports, so most generic CDNs refuse
+   it — and some CDNs that *serve* the games fine will still
+   reject our HEAD probe (CORS / 405). Probes are therefore only
+   an optimization:
+
+     hit     → 2xx, confirmed servable
+     miss    → 404/403/410, definitely not on this mirror
+     unknown → CORS / network / 405 / 5xx — can't verify, but an
+               iframe doesn't need CORS, so mount it anyway
+
+   All mirrors are probed in parallel with a hard timeout. If
+   nothing confirms, the first `unknown` mirror is mounted
+   optimistically; the player auto-advances once if it stalls,
+   and mirrors can be cycled manually (M key / footer chip).
+   A mirror that actually loads a game is remembered per game. */
 
 export interface GameMirror {
   id: string;
@@ -58,16 +69,87 @@ export const MIRRORS: GameMirror[] = [
     build: (p) => `https://cdn.statically.io/gh/${REPO_OWNER}/${REPO_NAME}/${REPO_BRANCH}/${p}`,
   },
   {
-    id: "rawcdn",
-    label: "rawcdn",
-    build: (p) => `https://rawcdn.githack.com/${REPO_OWNER}/${REPO_NAME}/${REPO_BRANCH}/${p}`,
+    id: "jsdelivr",
+    label: "jsdelivr",
+    build: (p) => `https://cdn.jsdelivr.net/gh/${REPO_OWNER}/${REPO_NAME}@${REPO_BRANCH}/${p}`,
   },
 ];
 
-export function probeHead(url: string): Promise<boolean> {
-  return fetch(url, { method: "HEAD" })
-    .then((res) => res.ok)
-    .catch(() => false);
+const encodePath = (file: string) => file.split("/").map(encodeURIComponent).join("/");
+
+export function mirrorUrl(mirrorId: string, slug: string, file: string): string {
+  const m = MIRRORS.find((x) => x.id === mirrorId) ?? MIRRORS[0];
+  return m.build(encodePath(`${slug}/${file}`));
+}
+
+/* Per-game mirror memory — once a mirror loads a game, prefer it. */
+const PREFS_KEY = "scribedesk:mirror-prefs:v1";
+
+function readPrefs(): Record<string, string> {
+  try {
+    return JSON.parse(localStorage.getItem(PREFS_KEY) ?? "{}") as Record<string, string>;
+  } catch {
+    return {};
+  }
+}
+
+export function saveMirrorPref(slug: string, mirrorId: string): void {
+  try {
+    const prefs = readPrefs();
+    prefs[slug] = mirrorId;
+    localStorage.setItem(PREFS_KEY, JSON.stringify(prefs));
+  } catch {
+    /* private mode — preference just won't stick */
+  }
+}
+
+/** Ladder order for a game: remembered mirror first, then the rest. */
+export function mirrorLadder(slug: string): string[] {
+  const pref = readPrefs()[slug];
+  const ids = MIRRORS.map((m) => m.id);
+  if (pref && ids.includes(pref)) return [pref, ...ids.filter((id) => id !== pref)];
+  return ids;
+}
+
+export type ProbeVerdict = "hit" | "miss" | "unknown";
+
+/** HEAD probe with a hard timeout and a three-way verdict. */
+export async function probeMirror(
+  mirrorId: string,
+  slug: string,
+  file: string
+): Promise<ProbeVerdict> {
+  const ctrl = new AbortController();
+  const timer = window.setTimeout(() => ctrl.abort(), 3500);
+  try {
+    const res = await fetch(mirrorUrl(mirrorId, slug, file), {
+      method: "HEAD",
+      signal: ctrl.signal,
+      redirect: "follow",
+    });
+    if (res.ok) return "hit";
+    if (res.status === 404 || res.status === 403 || res.status === 410) return "miss";
+    return "unknown"; // server answered oddly (405/5xx) — still worth mounting
+  } catch {
+    return "unknown"; // CORS / network / timeout — unverifiable, mountable
+  } finally {
+    window.clearTimeout(timer);
+  }
+}
+
+/** Race every mirror against one file, in ladder order. */
+export async function pickMirror(
+  slug: string,
+  file: string,
+  order: string[]
+): Promise<{ mirrorId: string; verified: boolean } | null> {
+  const verdicts = await Promise.all(
+    order.map(async (id) => ({ id, v: await probeMirror(id, slug, file) }))
+  );
+  const byId = new Map(verdicts.map((r) => [r.id, r.v]));
+  for (const id of order) if (byId.get(id) === "hit") return { mirrorId: id, verified: true };
+  for (const id of order) if (byId.get(id) === "unknown") return { mirrorId: id, verified: false };
+  return null;
 }
 
 /** Folders that are infrastructure, not games. */
@@ -246,9 +328,11 @@ export interface GameEntry {
   kind: EntryKind;
   /** Entry file relative to the port folder, or a summary of found extensions. */
   file: string;
+  /** Mirror the entry was confirmed on (or optimistically picked). */
+  mirrorId?: string;
+  /** True when a HEAD probe confirmed the mirror serves the file. */
+  verified?: boolean;
 }
-
-const encodePath = (file: string) => file.split("/").map(encodeURIComponent).join("/");
 
 /** Lower = better document candidate. ≥5 = not executable in-browser. */
 function rank(path: string): number {
@@ -267,19 +351,26 @@ export async function resolveGameEntry(game: RemoteGame): Promise<GameEntry> {
   const hit = entryCache.get(game.slug);
   if (hit) return hit;
 
-  /* Fast path — the two conventional entry files, probed across
-     the whole mirror ladder so one dead CDN can't block a game. */
+  const order = mirrorLadder(game.slug);
+
+  /* Fast path — the conventional entry files, racing every mirror
+     in parallel so one slow/dead CDN can't stall the launch. */
   for (const f of ["index.html", "index.htm"]) {
-    for (const m of MIRRORS) {
-      if (await probeHead(m.build(`${game.slug}/${f}`))) {
-        const entry: GameEntry = { kind: "html", file: f };
-        entryCache.set(game.slug, entry);
-        return entry;
-      }
+    const pick = await pickMirror(game.slug, f, order);
+    if (pick) {
+      const entry: GameEntry = {
+        kind: "html",
+        file: f,
+        mirrorId: pick.mirrorId,
+        verified: pick.verified,
+      };
+      entryCache.set(game.slug, entry);
+      return entry;
     }
   }
 
-  /* Slow path — list the port folder and pick the best executable file. */
+  /* Slow path — list the port folder, pick the best executable file,
+     then race the mirrors for that file too. */
   let entry: GameEntry;
   try {
     const res = await fetch(
@@ -297,7 +388,13 @@ export async function resolveGameEntry(game: RemoteGame): Promise<GameEntry> {
     if (candidates.length > 0) {
       const file = candidates[0].path;
       const kind: EntryKind = file.toLowerCase().endsWith(".swf") ? "swf" : "html";
-      entry = { kind, file: encodePath(file) };
+      const pick = await pickMirror(game.slug, file, order);
+      entry = {
+        kind,
+        file,
+        mirrorId: pick?.mirrorId ?? order[0],
+        verified: pick?.verified ?? false,
+      };
     } else {
       const exts = blobs.length
         ? [...new Set(blobs.map((b) => `.${b.path.split(".").pop() ?? "?"}`))].slice(0, 4).join(" ")
