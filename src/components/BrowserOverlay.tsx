@@ -59,10 +59,9 @@ const VERDICT_COPY: Record<Verdict, { title: string; sub: (host: string) => stri
   },
 };
 
-const ENGINE_ORDER: EngineId[] = ["embedded", "ultraviolet", "baremux", "rammerhead"];
+const ENGINE_ORDER: EngineId[] = ["ultraviolet", "baremux", "rammerhead"];
 
 function engineTag(id: EngineId): { text: string; live: boolean } {
-  if (id === "embedded") return { text: "built-in", live: true };
   return isDeployed(id) ? { text: "live", live: true } : { text: "awaiting deploy", live: false };
 }
 
@@ -82,7 +81,7 @@ export default function BrowserOverlay({ session, engineId, onSwitchEngine, onDe
 
   const proxied = resolveThrough(engineId, url);
   const engineLabel = ENGINES[engineId].label;
-  const deployed = engineId !== "embedded" && isDeployed(engineId);
+  const deployed = isDeployed(engineId);
 
   const [closing, setClosing] = useState(false);
   const [loaded, setLoaded] = useState(false);
@@ -426,9 +425,9 @@ export default function BrowserOverlay({ session, engineId, onSwitchEngine, onDe
           <span className="sd-player-url" title={url}>
             {url}
           </span>
-          {engineId !== "embedded" && !isDeployed(engineId) && (
+          {!isDeployed(engineId) && (
             <span className="sd-browser-note">
-              slot not deployed — falling back to the embedded frame
+              slot not deployed — routing via the direct in-page frame
             </span>
           )}
           <span className="sd-player-hints">

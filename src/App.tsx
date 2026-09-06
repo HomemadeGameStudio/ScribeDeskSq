@@ -23,7 +23,7 @@ import {
   saveSettings,
   type SettingsState,
 } from "./lib/settings";
-import { describeGame, resolveGameEntry, type RemoteGame } from "./lib/games";
+import { describeGame, type RemoteGame } from "./lib/games";
 import type { Shortcut } from "./data/shortcuts";
 
 type CategoryFilter = "all" | "apps" | "ai" | "games";
@@ -155,34 +155,14 @@ export default function App() {
     endStealth();
   };
 
-  /* ---------- in-page player sessions ---------- */
-
-  const resolveInto = (game: RemoteGame) => {
-    resolveGameEntry(game)
-      .then((entry) => {
-        // The player owns the mirror ladder + engine wrap from here.
-        setPlayer((p) =>
-          p && p.game.slug === game.slug && !p.entry && !p.error ? { ...p, entry } : p
-        );
-      })
-      .catch((err: unknown) => {
-        setPlayer((p) =>
-          p && p.game.slug === game.slug && !p.entry
-            ? { ...p, error: err instanceof Error ? err.message : "resolve failed" }
-            : p
-        );
-      });
-  };
+  /* ---------- in-page player sessions ----------
+     The player component owns the whole payload pipeline
+     (loadPort → rebase → shim → srcDoc). App just opens the
+     session and tears it down. */
 
   const openPlayer = (game: RemoteGame, stealth = false) => {
     beginStealth(stealth);
-    setPlayer({ game, entry: null, error: null, stealth, key: Date.now() });
-    resolveInto(game);
-  };
-
-  const retryPlayer = (game: RemoteGame) => {
-    setPlayer((p) => (p ? { ...p, entry: null, error: null, key: Date.now() } : p));
-    resolveInto(game);
+    setPlayer({ game, stealth, key: Date.now() });
   };
 
   const destroyPlayer = () => {
@@ -346,10 +326,8 @@ export default function App() {
       {player && (
         <GamePlayer
           session={player}
-          engineId={settings.engine}
           engineLabel={ENGINES[settings.engine].label}
           onDestroy={destroyPlayer}
-          onRetry={retryPlayer}
         />
       )}
 

@@ -1,56 +1,47 @@
 import { useCallback, useEffect, useRef, useState } from "react";
 import type { CSSProperties } from "react";
-import { MIRRORS, mirrorLadder, mirrorUrl, ruffleDocument, saveMirrorPref, type GameEntry, type RemoteGame } from "../lib/games";
-import { resolveThrough } from "../lib/proxy";
+import { loadPort, mirrorLadder, MIRRORS, type PortPayload, type RemoteGame } from "../lib/games";
 import { CloseIcon, CompressIcon, ExpandIcon, RefreshIcon, ShieldIcon } from "./icons";
 
 /* ============================================================
    In-page player session.
-   One iframe payload at a time — clicking a different tile swaps
-   the session and the frame; the page never navigates, no tab is
-   ever spawned. Closing nulls the iframe src so audio/processes
-   die instantly.
+   Clicking a different tile swaps the session; the page never
+   navigates and no tab is ever spawned. Closing blanks the
+   iframe srcDoc so audio/processes die instantly.
 
-    Payload pipeline:
-      1. entry resolution → relative file inside the port folder,
-         with a mirror pre-picked by racing all CDNs in parallel
-         (hit / miss / can't-tell — an unprobed CDN still mounts)
-      2. mirror ladder    → gitloaf → raw.githack → statically →
-         jsdelivr; mounts instantly, cycle with M, unverified
-         stalls auto-advance once, working mirrors are remembered
-      3. engine wrap      → resolveThrough (embedded by default)
-   The loader is dismissible: huge ports take minutes to fire
-   `load`, so a click reveals the frame early to watch progress.
+   Payload pipeline (owned entirely by this component):
+     1. loadPort()   → fetches the entry HTML from a CORS-open
+        mirror, injects <base> + the absolute-path shim, and
+        returns a mountable same-origin document
+     2. mount        → srcDoc iframe; `load` fires as soon as the
+        document parses, the port's own loading screen takes over
+     3. mirrors      → manual cycling (chip / M key), remembered
+        per game whenever one actually serves
    ============================================================ */
 
 export interface PlayerSession {
   game: RemoteGame;
-  /** Resolved payload. `null` while the port is being located. */
-  entry: GameEntry | null;
-  error: string | null;
   stealth: boolean;
   key: number;
 }
 
 interface Props {
   session: PlayerSession;
-  engineId: string;
   engineLabel: string;
   onDestroy: () => void;
-  onRetry: (game: RemoteGame) => void;
 }
 
 type Status = "locating" | "loading" | "live" | "error";
 
 const STATUS_LABEL: Record<Status, string> = {
   locating: "locating",
-  loading: "connecting",
+  loading: "booting",
   live: "live",
   error: "failed",
 };
 
-/** Seconds before hinting that the loader can be dismissed. */
-const SLOW_HINT_S = 8;
+/** Seconds before reassuring the user that big ports pull slowly. */
+const SLOW_HINT_S = 12;
 
 function fmt(elapsed: number): string {
   const m = Math.floor(elapsed / 60).toString().padStart(2, "0");
@@ -58,122 +49,70 @@ function fmt(elapsed: number): string {
   return `${m}:${s}`;
 }
 
-function shortUrl(url: string): string {
-  try {
-    const u = new URL(url);
-    const path = u.pathname.length > 26 ? `${u.pathname.slice(0, 26)}…` : u.pathname;
-    return `${u.host}${path}`;
-  } catch {
-    return url;
-  }
-}
+export default function GamePlayer({ session, engineLabel, onDestroy }: Props) {
+  const { game, stealth, key } = session;
 
-export default function GamePlayer({ session, engineId, engineLabel, onDestroy, onRetry }: Props) {
-  const { game, entry, error, stealth, key } = session;
+  const [payload, setPayload] = useState<PortPayload | null>(null);
+  const [error, setError] = useState<string | null>(null);
+  const [mirrorId, setMirrorId] = useState<string>(mirrorLadder(game.slug)[0]);
+  const [onlyMirror, setOnlyMirror] = useState<string | null>(null);
+  const [tick, setTick] = useState(0);
 
   const [closing, setClosing] = useState(false);
   const [loaded, setLoaded] = useState(false);
-  const [revealed, setRevealed] = useState(false);
   const [slowHint, setSlowHint] = useState(false);
-  const [frameUrl, setFrameUrl] = useState<string | null>(null);
-  const [mirrorId, setMirrorId] = useState<string>(MIRRORS[0].id);
-  const [stallNote, setStallNote] = useState<string | null>(null);
-  const [ladderFailed, setLadderFailed] = useState(false);
-  const [ladderTick, setLadderTick] = useState(0);
   const [isFs, setIsFs] = useState(false);
   const [spin, setSpin] = useState(false);
   const [elapsed, setElapsed] = useState(0);
-  const [reloadKey, setReloadKey] = useState(0);
 
   const shellRef = useRef<HTMLDivElement>(null);
   const iframeRef = useRef<HTMLIFrameElement>(null);
   const closeRef = useRef<HTMLButtonElement>(null);
   const closingRef = useRef(false);
-  const autoAdvancedRef = useRef(false);
 
-  const unsupported = entry?.kind === "unsupported";
-  const playable = !!entry && entry.kind !== "unsupported";
-  const loaderGone = loaded || revealed;
+  const status: Status = error ? "error" : !payload ? "locating" : loaded ? "live" : "loading";
   const mirrorLabel = MIRRORS.find((m) => m.id === mirrorId)?.label ?? mirrorId;
-  const status: Status =
-    error || unsupported || ladderFailed ? "error" : !entry ? "locating" : loaded ? "live" : "loading";
 
-  /* ---------- mirror ladder: mount immediately, no blocking probes ----------
-     resolveGameEntry already raced the CDNs in parallel and picked
-     one — verified (HEAD confirmed) or optimistic (probes couldn't
-     tell, but iframes don't need CORS). We mount it at once; the
-     user can cycle mirrors any time (M / footer chip), an unverified
-     mirror that stalls auto-advances once, and a mirror that
-     actually loads a game is remembered for next time. */
+  /* ---------- load the port ---------- */
   useEffect(() => {
-    setFrameUrl(null);
+    setPayload(null);
+    setError(null);
     setLoaded(false);
-    setRevealed(false);
     setSlowHint(false);
-    setStallNote(null);
-    setLadderFailed(false);
     setElapsed(0);
     setClosing(false);
     closingRef.current = false;
-    autoAdvancedRef.current = false;
 
-    if (!entry || entry.kind === "unsupported") {
-      setMirrorId(MIRRORS[0].id);
-      return;
-    }
+    let cancelled = false;
+    loadPort(game, onlyMirror ? { only: onlyMirror } : undefined)
+      .then((p) => {
+        if (!cancelled) {
+          setPayload(p);
+          setMirrorId(p.mirrorId);
+        }
+      })
+      .catch((err: unknown) => {
+        if (!cancelled) setError(err instanceof Error ? err.message : "port failed to load");
+      });
 
-    const order = mirrorLadder(game.slug);
-    const startId = entry.mirrorId && order.includes(entry.mirrorId) ? entry.mirrorId : order[0];
-    setMirrorId(startId);
-    setFrameUrl(resolveThrough(engineId, mirrorUrl(startId, game.slug, entry.file)));
-    // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [key, entry, ladderTick]);
+    return () => {
+      cancelled = true;
+    };
+  }, [game, key, tick, onlyMirror]);
 
-  /* Manual mirror switch — mounts the next mirror immediately, no probing. */
-  const cycleMirror = useCallback(() => {
-    if (!entry || entry.kind === "unsupported") return;
-    const order = mirrorLadder(game.slug);
-    const next = order[(order.indexOf(mirrorId) + 1) % order.length];
-    setMirrorId(next);
-    setFrameUrl(resolveThrough(engineId, mirrorUrl(next, game.slug, entry.file)));
-    setLoaded(false);
-    setRevealed(false);
-    setSlowHint(false);
-    setStallNote(null);
-    setLadderFailed(false);
-    setElapsed(0);
-    setReloadKey((k) => k + 1);
-  }, [entry, mirrorId, game.slug, engineId]);
-
-  /* If a mirror we couldn't verify stalls before `load` fires,
-     advance to the next one once — dead-mirror recovery. */
+  /* Big ports pull hundreds of MB — reassure after a while. */
   useEffect(() => {
-    if (!frameUrl || loaderGone || ladderFailed) return;
-    if (entry?.verified !== false) return; // verified mirrors are trusted
-    if (autoAdvancedRef.current) return;
-    const id = window.setTimeout(() => {
-      autoAdvancedRef.current = true;
-      const label = MIRRORS.find((m) => m.id === mirrorId)?.label ?? "mirror";
-      setStallNote(`${label} stalled — switching mirror`);
-      cycleMirror();
-    }, 15000);
-    return () => window.clearTimeout(id);
-    // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [frameUrl, loaderGone, ladderFailed, entry, mirrorId, cycleMirror]);
-
-  /* Heavy ports stall long before `load` fires — offer the reveal early. */
-  useEffect(() => {
-    if (!frameUrl || loaderGone) return;
+    if (status !== "locating") return;
     const id = window.setTimeout(() => setSlowHint(true), SLOW_HINT_S * 1000);
     return () => window.clearTimeout(id);
-  }, [frameUrl, loaderGone, reloadKey]);
+  }, [status, tick, key]);
 
   /* Session clock while live. */
   useEffect(() => {
     if (status !== "live") return;
     const id = window.setInterval(() => setElapsed((e) => e + 1), 1000);
     return () => window.clearInterval(id);
-  }, [status, key, reloadKey]);
+  }, [status]);
 
   /* Scroll lock + focus the close button; restore on unmount. */
   useEffect(() => {
@@ -214,15 +153,23 @@ export default function GamePlayer({ session, engineId, engineLabel, onDestroy, 
   }, []);
 
   const reload = useCallback(() => {
-    if (!playable) return;
     setSpin(true);
     window.setTimeout(() => setSpin(false), 650);
-    setLoaded(false);
-    setRevealed(false);
-    setSlowHint(false);
-    setElapsed(0);
-    setReloadKey((k) => k + 1);
-  }, [playable]);
+    setTick((t) => t + 1);
+  }, []);
+
+  /* Manual mirror switch — retry through one specific mirror. */
+  const cycleMirror = useCallback(() => {
+    const order = mirrorLadder(game.slug);
+    const next = order[(order.indexOf(mirrorId) + 1) % order.length];
+    setOnlyMirror(next);
+    setTick((t) => t + 1);
+  }, [game.slug, mirrorId]);
+
+  const retryAllMirrors = useCallback(() => {
+    setOnlyMirror(null);
+    setTick((t) => t + 1);
+  }, []);
 
   /* Fullscreen tracking. */
   useEffect(() => {
@@ -254,10 +201,6 @@ export default function GamePlayer({ session, engineId, engineLabel, onDestroy, 
     return () => window.removeEventListener("keydown", onKey);
   }, [close, toggleFs, reload, cycleMirror]);
 
-  const revealLoader = () => {
-    if (frameUrl && !loaderGone) setRevealed(true);
-  };
-
   return (
     <div
       className={`sd-player-overlay${closing ? " is-closing" : ""}`}
@@ -285,8 +228,8 @@ export default function GamePlayer({ session, engineId, engineLabel, onDestroy, 
             <span className="sd-player-title">{game.name}</span>
             <span className="sd-player-sub">
               web port · /{game.slug}
-              {entry && playable && <> · {entry.file}</>}
-              {entry?.kind === "swf" && <> · flash</>}
+              {payload && <> · {payload.file}</>}
+              {payload?.kind === "swf" && <> · flash</>}
             </span>
           </span>
 
@@ -312,13 +255,7 @@ export default function GamePlayer({ session, engineId, engineLabel, onDestroy, 
             >
               {isFs ? <CompressIcon size={16} /> : <ExpandIcon size={16} />}
             </button>
-            <button
-              className="sd-p-btn"
-              onClick={reload}
-              disabled={!playable}
-              aria-label="Reload frame"
-              title="Reload (R)"
-            >
+            <button className="sd-p-btn" onClick={reload} aria-label="Reload port" title="Reload (R)">
               <span className={`sd-p-spin${spin ? " is-spinning" : ""}`}>
                 <RefreshIcon size={16} />
               </span>
@@ -333,74 +270,46 @@ export default function GamePlayer({ session, engineId, engineLabel, onDestroy, 
 
         {/* ---------- viewport ---------- */}
         <div className="sd-player-view">
-          {playable && frameUrl && (
+          {payload && (
             <iframe
-              key={`${key}-${reloadKey}`}
+              key={`${key}-${tick}`}
               ref={iframeRef}
-              {...(entry?.kind === "swf" ? { srcDoc: ruffleDocument(frameUrl) } : { src: frameUrl })}
-              className={loaderGone ? "is-live" : ""}
-              onLoad={() => {
-                setLoaded(true);
-                // This mirror demonstrably works for this game — remember it.
-                saveMirrorPref(game.slug, mirrorId);
-              }}
+              srcDoc={payload.doc}
+              className={loaded ? "is-live" : ""}
+              onLoad={() => setLoaded(true)}
               title={game.name}
               allow="fullscreen; gamepad; pointer-lock; autoplay; clipboard-write"
               allowFullScreen
             />
           )}
 
-          <div
-            className={`sd-player-load${loaderGone ? " is-done" : ""}${status === "error" ? " is-error" : ""}${
-              frameUrl && status !== "error" ? " has-frame" : ""
-            }`}
-            onClick={revealLoader}
-            role={frameUrl && status !== "error" ? "button" : undefined}
-            aria-label={frameUrl && status !== "error" ? "Dismiss loader and reveal the game frame" : undefined}
-          >
+          <div className={`sd-player-load${loaded ? " is-done" : ""}${status === "error" ? " is-error" : ""}`}>
             {status === "error" ? (
               <>
-                <span className="sd-player-load-title">
-                  {unsupported ? "Unsupported port" : ladderFailed ? "Every mirror failed" : "Port unreachable"}
+                <span className="sd-player-load-title">Port unreachable</span>
+                <span className="sd-player-load-sub">{error ?? "the mirrors refused this port"}</span>
+                <span className="sd-err-row">
+                  <button className="sd-player-retry" onClick={cycleMirror}>
+                    switch mirror
+                  </button>
+                  <button className="sd-player-retry" onClick={retryAllMirrors}>
+                    try all mirrors
+                  </button>
                 </span>
-                <span className="sd-player-load-sub">
-                  {unsupported
-                    ? `can't execute ${entry?.file ?? "nothing"} in-browser`
-                    : ladderFailed
-                      ? `no CDN would serve /${game.slug}/${entry?.file ?? "index.html"} — switch mirrors or retry`
-                      : error ?? "no entry file found"}
-                </span>
-                {ladderFailed ? (
-                  <span className="sd-err-row">
-                    <button className="sd-player-retry" onClick={cycleMirror}>
-                      switch mirror
-                    </button>
-                    <button className="sd-player-retry" onClick={() => setLadderTick((t) => t + 1)}>
-                      retry ladder
-                    </button>
-                  </span>
-                ) : (
-                  !unsupported && (
-                    <button className="sd-player-retry" onClick={() => onRetry(game)}>
-                      retry resolve
-                    </button>
-                  )
-                )}
               </>
             ) : (
               <>
                 <span className="sd-player-ring" aria-hidden />
                 <span className="sd-player-load-title">
-                  {!entry ? "Locating port" : "Streaming port"}
+                  {payload ? "Booting port" : "Pulling port files"}
                 </span>
                 <span className="sd-player-load-sub">
-                  {!entry
-                    ? `sniffing /${game.slug} for playable files`
-                    : `${mirrorLabel} mirror${entry.verified === false ? " · optimistic" : ""} · ${engineLabel.toLowerCase()} tunnel`}
+                  {mirrorLabel} mirror · {engineLabel.toLowerCase()} armed
                 </span>
-                {stallNote && <span className="sd-player-load-hint">{stallNote}</span>}
-                {slowHint && frameUrl && !stallNote && (
-                  <span className="sd-player-load-hint">large ports take a while — click to reveal the frame</span>
+                {slowHint && (
+                  <span className="sd-player-load-hint">
+                    big ports pull hundreds of MB — the mirror is still working
+                  </span>
                 )}
               </>
             )}
@@ -416,14 +325,13 @@ export default function GamePlayer({ session, engineId, engineLabel, onDestroy, 
           <button
             className="sd-mirror-chip"
             onClick={cycleMirror}
-            disabled={!playable}
             title="Switch CDN mirror (M)"
             aria-label={`CDN mirror: ${mirrorLabel}. Click to switch.`}
           >
             mirror · {mirrorLabel}
           </button>
-          <span className="sd-player-url" title={frameUrl ?? undefined}>
-            {frameUrl ? shortUrl(frameUrl) : "resolving entry…"}
+          <span className="sd-player-url" title={payload?.file}>
+            {payload ? `/${game.slug}/${payload.file}` : "resolving entry…"}
           </span>
           <span className="sd-player-hints">
             <span><kbd>esc</kbd>close</span>

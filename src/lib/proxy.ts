@@ -24,7 +24,7 @@
    routes into a dead path.
    ============================================================ */
 
-export type EngineId = "embedded" | "ultraviolet" | "baremux" | "rammerhead";
+export type EngineId = "ultraviolet" | "baremux" | "rammerhead";
 
 export interface ProxyEngine {
   id: EngineId;
@@ -32,35 +32,30 @@ export interface ProxyEngine {
   detail: string;
   /**
    * Transform a fully-qualified destination URL into the proxied URL.
-   * `null` = integration slot awaiting deployment (falls back to
-   * the embedded transport until `registerEngine` provides a wrap).
+   * `null` = integration slot awaiting deployment. Until a real
+   * `wrap` is registered the desk falls back to direct in-page
+   * framing, but "Embedded" is never offered as a choice.
    */
   wrap: ((url: string) => string) | null;
 }
 
 export const ENGINES: Record<EngineId, ProxyEngine> = {
-  embedded: {
-    id: "embedded",
-    label: "Embedded",
-    detail: "in-page frame · ships working",
-    wrap: (url) => url,
-  },
   ultraviolet: {
     id: "ultraviolet",
     label: "Ultraviolet",
-    detail: "slot · service-worker interceptor",
+    detail: "service-worker interceptor · recommended",
     wrap: null,
   },
   baremux: {
     id: "baremux",
     label: "Bare-Mux",
-    detail: "slot · websocket multiplexer",
+    detail: "websocket multiplexer · low overhead",
     wrap: null,
   },
   rammerhead: {
     id: "rammerhead",
     label: "Rammerhead",
-    detail: "slot · session-persistent",
+    detail: "session-persistent · good for games",
     wrap: null,
   },
 };
@@ -73,7 +68,7 @@ export function registerEngine(engine: ProxyEngine): void {
 }
 
 export function getEngine(id: string): ProxyEngine {
-  return customEngines.get(id) ?? ENGINES[id as EngineId] ?? ENGINES.embedded;
+  return customEngines.get(id) ?? ENGINES[id as EngineId] ?? ENGINES.ultraviolet;
 }
 
 /** A slot is live once it has a real `wrap` (built-in or registered). */

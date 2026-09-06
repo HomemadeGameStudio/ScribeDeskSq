@@ -10,7 +10,7 @@ export interface SettingsState {
 }
 
 export const DEFAULT_SETTINGS: SettingsState = {
-  engine: "embedded",
+  engine: "ultraviolet",
   cloak: "none",
   panicEnabled: true,
   panicTarget: "classroom",
